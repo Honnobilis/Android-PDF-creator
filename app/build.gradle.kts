@@ -16,8 +16,8 @@ android {
         versionName = "0.1.0"
 
         ndk {
-            // Real phones only; keeps the APK small (OpenCV + Tesseract are native).
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+            // 64-bit ARM only: all current phones; keeps the APK small (OpenCV + Tesseract are native).
+            abiFilters += listOf("arm64-v8a")
         }
     }
 
