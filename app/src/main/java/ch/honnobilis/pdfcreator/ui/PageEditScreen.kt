@@ -16,6 +16,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.RotateLeft
@@ -81,12 +87,30 @@ import kotlin.math.min
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PageEditScreen(vm: AppViewModel, pageId: Long) {
-    val page = vm.page(pageId)
-    LaunchedEffect(page == null) {
-        if (page == null) vm.navigate(Screen.Document)
+    val startIndex = vm.pages.indexOfFirst { it.id == pageId }
+    LaunchedEffect(startIndex < 0) {
+        if (startIndex < 0) vm.navigate(Screen.Document)
     }
-    if (page == null) return
-    val number = vm.pages.indexOfFirst { it.id == pageId } + 1
+    if (startIndex < 0 || vm.pages.isEmpty()) return
+
+    // Crop mode is shared by all pages; swiping is disabled while cropping
+    // so that dragging a corner never turns the page.
+    var cropMode by remember { mutableStateOf(false) }
+    val pager = rememberPagerState(initialPage = startIndex) { vm.pages.size }
+    val scope = rememberCoroutineScope()
+
+    // Keep the screen's page id in sync (used by retake / back navigation).
+    val currentId = vm.pages.getOrNull(pager.currentPage)?.id
+    LaunchedEffect(currentId) {
+        if (currentId != null && currentId != pageId) vm.navigate(Screen.PageEdit(currentId))
+    }
+    // Follow external changes (e.g. after deleting a page).
+    LaunchedEffect(pageId) {
+        val i = vm.pages.indexOfFirst { it.id == pageId }
+        if (i >= 0 && i != pager.currentPage) pager.scrollToPage(i)
+    }
+
+    val current = vm.pages.getOrNull(pager.currentPage)
     var confirmDelete by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -95,10 +119,18 @@ fun PageEditScreen(vm: AppViewModel, pageId: Long) {
                 navigationIcon = {
                     IconButton(onClick = { vm.back() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
                 },
-                title = { Text("Page $number of ${vm.pages.size}") },
+                title = { Text("Page ${pager.currentPage + 1} of ${vm.pages.size}") },
                 actions = {
-                    if (page is ImagePage) {
-                        IconButton(onClick = { vm.navigate(Screen.Camera(replacePageId = page.id)) }) {
+                    IconButton(
+                        onClick = { scope.launch { pager.animateScrollToPage(pager.currentPage - 1) } },
+                        enabled = pager.currentPage > 0,
+                    ) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "Previous page") }
+                    IconButton(
+                        onClick = { scope.launch { pager.animateScrollToPage(pager.currentPage + 1) } },
+                        enabled = pager.currentPage < vm.pages.lastIndex,
+                    ) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "Next page") }
+                    if (current is ImagePage) {
+                        IconButton(onClick = { vm.navigate(Screen.Camera(replacePageId = current.id)) }) {
                             Icon(Icons.Filled.CameraAlt, "Retake")
                         }
                     }
@@ -107,22 +139,51 @@ fun PageEditScreen(vm: AppViewModel, pageId: Long) {
             )
         },
     ) { padding ->
-        Box(Modifier.padding(padding)) {
-            when (page) {
-                is ImagePage -> ImagePageEditor(vm, page)
-                is PdfPage -> PdfPageEditor(vm, page)
+        Column(Modifier.padding(padding)) {
+            if (current is ImagePage) {
+                SingleChoiceSegmentedButtonRow(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                ) {
+                    SegmentedButton(
+                        selected = cropMode,
+                        onClick = { cropMode = true },
+                        shape = SegmentedButtonDefaults.itemShape(0, 2),
+                        icon = { Icon(Icons.Filled.Crop, null) },
+                    ) { Text("Crop") }
+                    SegmentedButton(
+                        selected = !cropMode,
+                        onClick = { cropMode = false },
+                        shape = SegmentedButtonDefaults.itemShape(1, 2),
+                        icon = { Icon(Icons.Filled.Tune, null) },
+                    ) { Text("Result") }
+                }
+            }
+            HorizontalPager(
+                state = pager,
+                key = { i -> vm.pages.getOrNull(i)?.id ?: i },
+                userScrollEnabled = !(cropMode && current is ImagePage),
+                modifier = Modifier.weight(1f),
+            ) { i ->
+                when (val page = vm.pages.getOrNull(i)) {
+                    is ImagePage -> ImagePageEditor(vm, page, cropMode)
+                    is PdfPage -> PdfPageEditor(vm, page)
+                    null -> Unit
+                }
             }
         }
     }
 
-    if (confirmDelete) {
+    if (confirmDelete && current != null) {
+        val number = pager.currentPage + 1
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
             title = { Text("Delete page $number?") },
             confirmButton = {
                 TextButton(onClick = {
                     confirmDelete = false
-                    vm.deletePage(pageId)
+                    vm.deletePage(current.id)
                 }) { Text("Delete") }
             },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
@@ -134,37 +195,15 @@ fun PageEditScreen(vm: AppViewModel, pageId: Long) {
 // Photo pages: crop + rotate + filter
 // ---------------------------------------------------------------------------------------
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ImagePageEditor(vm: AppViewModel, page: ImagePage) {
-    var cropMode by remember(page.id) { mutableIntStateOf(1) } // 0 = crop, 1 = result
-
+private fun ImagePageEditor(vm: AppViewModel, page: ImagePage, cropMode: Boolean) {
     val preview by produceState<Bitmap?>(null, page.previewFile) { value = vm.loadPreview(page) }
-    val result by produceState<Bitmap?>(null, preview, page.quad, page.rotation, page.effectiveFilter) {
+    val result by produceState<Bitmap?>(null, preview, page.quad, page.rotation, page.effectiveFilter, page.strength) {
         val p = preview
         value = if (p != null) vm.renderResult(page, p) else null
     }
 
     Column(Modifier.fillMaxSize()) {
-        SingleChoiceSegmentedButtonRow(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-        ) {
-            SegmentedButton(
-                selected = cropMode == 0,
-                onClick = { cropMode = 0 },
-                shape = SegmentedButtonDefaults.itemShape(0, 2),
-                icon = { Icon(Icons.Filled.Crop, null) },
-            ) { Text("Crop") }
-            SegmentedButton(
-                selected = cropMode == 1,
-                onClick = { cropMode = 1 },
-                shape = SegmentedButtonDefaults.itemShape(1, 2),
-                icon = { Icon(Icons.Filled.Tune, null) },
-            ) { Text("Result") }
-        }
-
         Box(
             Modifier
                 .weight(1f)
@@ -173,7 +212,7 @@ private fun ImagePageEditor(vm: AppViewModel, page: ImagePage) {
             contentAlignment = Alignment.Center,
         ) {
             val p = preview
-            if (cropMode == 0 && p != null) {
+            if (cropMode && p != null) {
                 CropEditor(p, page.quad) { vm.setQuad(page.id, it) }
             } else {
                 val r = result
@@ -185,7 +224,7 @@ private fun ImagePageEditor(vm: AppViewModel, page: ImagePage) {
             }
         }
 
-        if (cropMode == 0) {
+        if (cropMode) {
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -204,28 +243,22 @@ private fun ImagePageEditor(vm: AppViewModel, page: ImagePage) {
                 }
             }
         } else {
+            FilterChips(
+                selected = page.filter,
+                autoResult = page.autoFilter,
+                onSelect = { vm.setFilter(page.id, it) },
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+            )
+            StrengthSlider(
+                effective = page.effectiveFilter,
+                strength = page.strength,
+                onChange = { vm.setStrength(page.id, it) },
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                FilterMode.entries.forEach { mode ->
-                    FilterChip(
-                        selected = page.filter == mode,
-                        onClick = { vm.setFilter(page.id, mode) },
-                        label = {
-                            Text(if (mode == FilterMode.AUTO) "Auto · ${page.autoFilter.label}" else mode.label)
-                        },
-                    )
-                }
-            }
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    .padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
             ) {
                 RotateButtons(Modifier.weight(1f), onLeft = { vm.rotate(page.id, -90) }, onRight = { vm.rotate(page.id, 90) })
             }

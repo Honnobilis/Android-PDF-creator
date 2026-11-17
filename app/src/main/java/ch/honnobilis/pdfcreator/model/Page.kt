@@ -4,6 +4,8 @@ import android.graphics.Bitmap
 import android.net.Uri
 import java.io.File
 
+const val DEFAULT_STRENGTH = 0.5f
+
 enum class FilterMode(val label: String) {
     AUTO("Auto"),
     ORIGINAL("Original"),
@@ -56,6 +58,8 @@ data class ImagePage(
     /** What AUTO resolves to for this page (computed from the cropped image). */
     val autoFilter: FilterMode,
     override val thumbnail: Bitmap?,
+    /** Filter strength 0..1 (see ImageProcessor.applyFilter). */
+    val strength: Float = DEFAULT_STRENGTH,
 ) : PageItem {
     val effectiveFilter: FilterMode
         get() = if (filter == FilterMode.AUTO) autoFilter else filter

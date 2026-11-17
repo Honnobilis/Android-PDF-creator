@@ -96,7 +96,7 @@ class PdfBuilder(private val context: Context) {
 
     private fun addImagePage(doc: PDDocument, page: ImagePage, quality: Quality, ocr: OcrEngine?) {
         val src = BitmapIO.decode(page.sourceFile, 4000)
-        val bmp = ImageProcessor.render(src, page.quad, page.rotation, page.effectiveFilter, quality.maxSide)
+        val bmp = ImageProcessor.render(src, page.quad, page.rotation, page.effectiveFilter, page.strength, quality.maxSide)
         if (bmp !== src) src.recycle()
         val words = ocr?.recognize(bmp).orEmpty()
 

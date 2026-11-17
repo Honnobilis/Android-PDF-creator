@@ -37,6 +37,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -89,6 +91,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var saveJob: Job? = null
     private val pageJobs = HashMap<Long, Job>()
     private val importJobs = mutableSetOf<Job>()
+    private val thumbSemaphore = Semaphore(2)
     /** Unrotated thumbnails of existing PDF pages. */
     private val pdfBaseThumbs = HashMap<Long, Bitmap>()
     private val historyThumbs = LruCache<Uri, Bitmap>(40)
@@ -182,7 +185,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         job.start()
     }
 
-    private fun createImagePage(id: Long, bitmap: Bitmap, detect: Boolean, filter: FilterMode): ImagePage {
+    private fun createImagePage(
+        id: Long,
+        bitmap: Bitmap,
+        detect: Boolean,
+        filter: FilterMode,
+        strength: Float = prefs.strength,
+    ): ImagePage {
         val stamp = System.nanoTime()
         val sourceFile = File(sessionDir, "p${id}_${stamp}_src.jpg")
         val previewFile = File(sessionDir, "p${id}_${stamp}_preview.jpg")
@@ -193,8 +202,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
         val quad = if (detect) DocumentDetector.detect(preview) else Quad.FULL
         val auto = suggestFilter(preview, quad)
-        val page = ImagePage(id, sourceFile, previewFile, quad, 0, filter, auto, null)
-        val thumb = ImageProcessor.render(preview, quad, 0, page.effectiveFilter, THUMB_MAX)
+        val page = ImagePage(id, sourceFile, previewFile, quad, 0, filter, auto, null, strength)
+        val thumb = ImageProcessor.render(preview, quad, 0, page.effectiveFilter, strength, THUMB_MAX)
         preview.recycle()
         return page.copy(thumbnail = thumb)
     }
@@ -214,11 +223,55 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun deletePage(id: Long) {
-        pageJobs.remove(id)?.cancel()
-        pages.removeAll { it.id == id }
-        pdfBaseThumbs.remove(id)
-        dirty = true
-        if (screen is Screen.PageEdit) screen = Screen.Document
+        val idx = pages.indexOfFirst { it.id == id }
+        deletePages(setOf(id))
+        if (screen is Screen.PageEdit) {
+            screen = if (pages.isEmpty()) Screen.Document else Screen.PageEdit(pages[idx.coerceIn(0, pages.lastIndex)].id)
+        }
+    }
+
+    fun deletePages(ids: Set<Long>) {
+        ids.forEach { id ->
+            pageJobs.remove(id)?.cancel()
+            pdfBaseThumbs.remove(id)
+        }
+        if (pages.removeAll { it.id in ids }) dirty = true
+    }
+
+    /**
+     * Sets filter and strength on several pages. Scanned PDF pages are converted to
+     * photo pages first; digital PDF pages are skipped.
+     */
+    fun applyFilterToPages(ids: Set<Long>, filter: FilterMode, strength: Float) {
+        prefs.strength = strength
+        val targets = pages.filter { it.id in ids }
+        val scans = targets.filterIsInstance<PdfPage>().filter { it.kind == PdfPageKind.SCANNED }
+        targets.filterIsInstance<ImagePage>().forEach {
+            updateImagePage(it.copy(filter = filter, strength = strength), recomputeAuto = false)
+        }
+        if (scans.isEmpty()) return
+        busyMessage = "Preparing ${scans.size} scanned page" + if (scans.size == 1) "…" else "s…"
+        viewModelScope.launch {
+            try {
+                for (scan in scans) {
+                    val converted = convertScan(scan) ?: continue
+                    replace(converted.copy(filter = filter, strength = strength))
+                    updateImagePage(converted.copy(filter = filter, strength = strength), recomputeAuto = false)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                message = "Could not prepare a page: ${e.message}"
+            } finally {
+                busyMessage = null
+            }
+        }
+    }
+
+    fun setStrength(id: Long, strength: Float) {
+        val p = page(id) as? ImagePage ?: return
+        prefs.strength = strength
+        updateImagePage(p.copy(strength = strength), recomputeAuto = false)
     }
 
     fun rotate(id: Long, delta: Int) {
@@ -263,13 +316,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         dirty = true
         pageJobs.remove(updated.id)?.cancel()
         pageJobs[updated.id] = viewModelScope.launch {
-            val refreshed = withContext(Dispatchers.Default) {
+            val refreshed = thumbSemaphore.withPermit {
+                withContext(Dispatchers.Default) {
                 val preview = BitmapIO.decode(updated.previewFile, PREVIEW_MAX)
                 val auto = if (recomputeAuto) suggestFilter(preview, updated.quad) else updated.autoFilter
                 val p = updated.copy(autoFilter = auto)
-                val thumb = ImageProcessor.render(preview, p.quad, p.rotation, p.effectiveFilter, THUMB_MAX)
-                preview.recycle()
-                p.copy(thumbnail = thumb)
+                val thumb = ImageProcessor.render(preview, p.quad, p.rotation, p.effectiveFilter, p.strength, THUMB_MAX)
+                    preview.recycle()
+                    p.copy(thumbnail = thumb)
+                }
             }
             // Only apply if nothing changed in the meantime.
             val current = page(updated.id) as? ImagePage
@@ -284,19 +339,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Converts an untouched scanned PDF page into an editable photo page. */
     fun convertScanToImage(id: Long) {
         val p = page(id) as? PdfPage ?: return
-        val src = source ?: return
         busyMessage = "Preparing page…"
         viewModelScope.launch {
             try {
-                val page = withContext(Dispatchers.Default) {
-                    val bmp = withRenderer(src.cacheFile) { r ->
-                        PdfBuilder.renderPage(r, p.index, p.nativeScale.coerceIn(1f, 5f), SOURCE_MAX)
-                    }
-                    createImagePage(p.id, BitmapIO.rotate(bmp, p.extraRotation), detect = false, FilterMode.ORIGINAL)
-                }
-                replace(page)
-                pdfBaseThumbs.remove(id)
-                dirty = true
+                convertScan(p)?.let { replace(it) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -305,6 +351,21 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 busyMessage = null
             }
         }
+    }
+
+    /** Renders a scanned page at its native resolution into a photo page with the same id. */
+    private suspend fun convertScan(p: PdfPage): ImagePage? {
+        val src = source ?: return null
+        val converted = withContext(Dispatchers.Default) {
+            val bmp = withRenderer(src.cacheFile) { r ->
+                PdfBuilder.renderPage(r, p.index, p.nativeScale.coerceIn(1f, 5f), SOURCE_MAX)
+            }
+            createImagePage(p.id, BitmapIO.rotate(bmp, p.extraRotation), detect = false, FilterMode.ORIGINAL)
+        }
+        if (page(p.id) == null) return null // deleted meanwhile
+        pdfBaseThumbs.remove(p.id)
+        dirty = true
+        return converted
     }
 
     private fun replace(page: PageItem) {
@@ -318,7 +379,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     suspend fun renderResult(page: ImagePage, preview: Bitmap): Bitmap = withContext(Dispatchers.Default) {
-        ImageProcessor.render(preview, page.quad, page.rotation, page.effectiveFilter, PREVIEW_MAX)
+        ImageProcessor.render(preview, page.quad, page.rotation, page.effectiveFilter, page.strength, PREVIEW_MAX)
     }
 
     suspend fun renderPdfPage(page: PdfPage): Bitmap? {

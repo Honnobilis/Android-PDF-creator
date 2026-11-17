@@ -116,6 +116,11 @@ class Prefs(context: Context) {
         get() = sp.getInt("quality", 2)
         set(v) = sp.edit().putInt("quality", v).apply()
 
+    /** Filter strength used for new pages (the last one chosen). */
+    var strength: Float
+        get() = sp.getFloat("strength", 0.5f)
+        set(v) = sp.edit().putFloat("strength", v).apply()
+
     var ocr: Boolean
         get() = sp.getBoolean("ocr", false)
         set(v) = sp.edit().putBoolean("ocr", v).apply()
