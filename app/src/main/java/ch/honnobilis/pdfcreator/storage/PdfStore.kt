@@ -80,6 +80,14 @@ class PdfStore(private val context: Context) {
 
     fun delete(uri: Uri): Boolean = resolver.delete(uri, null, null) > 0
 
+    /** Renames a PDF in the folder. Returns the name it actually got. */
+    fun rename(uri: Uri, newName: String): String {
+        val name = ensurePdfExtension(newName)
+        val values = ContentValues().apply { put(MediaStore.MediaColumns.DISPLAY_NAME, name) }
+        check(resolver.update(uri, values, null, null) > 0) { "Could not rename the file" }
+        return displayName(uri) ?: name
+    }
+
     fun displayName(uri: Uri): String? = runCatching {
         resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
             if (c.moveToFirst()) c.getString(0) else null

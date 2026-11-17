@@ -121,6 +121,19 @@ fun sharePdf(context: Context, uri: Uri, name: String) {
     context.startActivity(Intent.createChooser(send, "Share PDF"))
 }
 
+fun sharePdfs(context: Context, pdfs: List<Pair<Uri, String>>) {
+    if (pdfs.size == 1) return sharePdf(context, pdfs[0].first, pdfs[0].second)
+    val send = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+        type = PdfStore.MIME
+        putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(pdfs.map { it.first }))
+        clipData = ClipData.newRawUri(pdfs[0].second, pdfs[0].first).also { clip ->
+            pdfs.drop(1).forEach { clip.addItem(ClipData.Item(it.first)) }
+        }
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(send, "Share ${pdfs.size} PDFs"))
+}
+
 fun openPdf(context: Context, uri: Uri) {
     val view = Intent(Intent.ACTION_VIEW).apply {
         setDataAndType(uri, PdfStore.MIME)

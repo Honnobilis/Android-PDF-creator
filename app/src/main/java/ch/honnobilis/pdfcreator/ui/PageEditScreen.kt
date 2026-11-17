@@ -61,6 +61,8 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
@@ -74,7 +76,6 @@ import ch.honnobilis.pdfcreator.model.PdfPage
 import ch.honnobilis.pdfcreator.model.PdfPageKind
 import ch.honnobilis.pdfcreator.model.Pt
 import ch.honnobilis.pdfcreator.model.Quad
-import kotlin.math.hypot
 import kotlin.math.min
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -248,12 +249,21 @@ private fun RotateButtons(modifier: Modifier, onLeft: () -> Unit, onRight: () ->
 }
 
 /**
- * Shows the uncropped photo with four draggable corner handles.
+ * Shows the uncropped photo with four corner handles and four side handles.
+ * The outline follows the finger live; while dragging, a magnifier with a crosshair
+ * in the opposite top corner shows exactly where the point lands.
  * The quad is committed to the view model when a drag ends.
  */
 @Composable
 private fun CropEditor(bitmap: Bitmap, quad: Quad, onChange: (Quad) -> Unit) {
-    var local by remember(quad) { mutableStateOf(quad) }
+    // One state object for the whole lifetime of the editor; the gesture coroutine
+    // below keeps a reference to it, so it must never be replaced.
+    val localState = remember { mutableStateOf(quad) }
+    var local by localState
+    // -1 = nothing; 0..3 corners (TL, TR, BR, BL); 4..7 sides (top, right, bottom, left)
+    var active by remember { mutableIntStateOf(-1) }
+    LaunchedEffect(quad) { if (active < 0) local = quad }
+
     val currentOnChange by rememberUpdatedState(onChange)
     val image = remember(bitmap) { bitmap.asImageBitmap() }
     val density = LocalDensity.current
@@ -267,66 +277,118 @@ private fun CropEditor(bitmap: Bitmap, quad: Quad, onChange: (Quad) -> Unit) {
             Offset((boxW - bitmap.width * scale) / 2, (boxH - bitmap.height * scale) / 2),
             androidx.compose.ui.geometry.Size(bitmap.width * scale, bitmap.height * scale),
         )
-        val touchRadius = with(density) { 40.dp.toPx() }
+        val currentRect by rememberUpdatedState(imgRect)
+        val touchRadius = with(density) { 48.dp.toPx() }
 
-        fun toScreen(p: Pt) = Offset(imgRect.left + p.x * imgRect.width, imgRect.top + p.y * imgRect.height)
+        fun toScreen(p: Pt, r: Rect) = Offset(r.left + p.x * r.width, r.top + p.y * r.height)
+
+        /** Handle positions in screen coordinates: 4 corners, then 4 side midpoints. */
+        fun handles(q: Quad, r: Rect): List<Offset> {
+            val c = q.points.map { toScreen(it, r) }
+            return c + List(4) { i -> (c[i] + c[(i + 1) % 4]) / 2f }
+        }
 
         Canvas(
             Modifier
                 .fillMaxSize()
-                .pointerInput(imgRect) {
-                    var active = -1
+                .pointerInput(Unit) {
                     detectDragGestures(
                         onDragStart = { start ->
-                            val pts = local.points.map(::toScreen)
-                            val nearest = pts.indices.minByOrNull { hypot(pts[it].x - start.x, pts[it].y - start.y) }
-                            active = if (nearest != null &&
-                                hypot(pts[nearest].x - start.x, pts[nearest].y - start.y) <= touchRadius * 1.5f
-                            ) nearest else -1
+                            val hs = handles(localState.value, currentRect)
+                            val nearest = hs.indices.minByOrNull { (hs[it] - start).getDistance() }
+                            active = if (nearest != null && (hs[nearest] - start).getDistance() <= touchRadius) nearest else -1
                         },
                         onDrag = { change, drag ->
-                            if (active >= 0) {
+                            val a = active
+                            if (a >= 0) {
                                 change.consume()
-                                val old = local.points[active]
-                                val np = Pt(
-                                    (old.x + drag.x / imgRect.width).coerceIn(0f, 1f),
-                                    (old.y + drag.y / imgRect.height).coerceIn(0f, 1f),
-                                )
-                                local = local.with(active, np)
+                                val r = currentRect
+                                val dx = drag.x / r.width
+                                val dy = drag.y / r.height
+                                fun move(q: Quad, i: Int): Quad {
+                                    val p = q.points[i]
+                                    return q.with(i, Pt((p.x + dx).coerceIn(0f, 1f), (p.y + dy).coerceIn(0f, 1f)))
+                                }
+                                val q = localState.value
+                                localState.value = if (a < 4) move(q, a) else move(move(q, a - 4), (a - 3) % 4)
                             }
                         },
                         onDragEnd = {
-                            if (active >= 0) currentOnChange(local)
+                            if (active >= 0) currentOnChange(localState.value)
                             active = -1
                         },
-                        onDragCancel = { active = -1 },
+                        onDragCancel = {
+                            if (active >= 0) currentOnChange(localState.value)
+                            active = -1
+                        },
                     )
                 },
         ) {
-            drawImage(
-                image,
-                dstOffset = androidx.compose.ui.unit.IntOffset(imgRect.left.toInt(), imgRect.top.toInt()),
-                dstSize = androidx.compose.ui.unit.IntSize(imgRect.width.toInt(), imgRect.height.toInt()),
-            )
-            val pts = local.points.map(::toScreen)
-            // Dim everything outside the selection.
+            val stroke = 2.dp.toPx()
+
+            fun drawPhoto() {
+                drawImage(
+                    image,
+                    dstOffset = androidx.compose.ui.unit.IntOffset(imgRect.left.toInt(), imgRect.top.toInt()),
+                    dstSize = androidx.compose.ui.unit.IntSize(imgRect.width.toInt(), imgRect.height.toInt()),
+                )
+            }
+
+            fun outlinePath(pts: List<Offset>) = Path().apply {
+                moveTo(pts[0].x, pts[0].y)
+                pts.drop(1).forEach { lineTo(it.x, it.y) }
+                close()
+            }
+
+            drawPhoto()
+            val corners = local.points.map { toScreen(it, imgRect) }
             val outside = Path().apply {
                 fillType = PathFillType.EvenOdd
                 addRect(imgRect)
-                moveTo(pts[0].x, pts[0].y)
-                pts.drop(1).forEach { lineTo(it.x, it.y) }
-                close()
+                addPath(outlinePath(corners))
             }
             drawPath(outside, Color.Black.copy(alpha = 0.45f))
-            val outline = Path().apply {
-                moveTo(pts[0].x, pts[0].y)
-                pts.drop(1).forEach { lineTo(it.x, it.y) }
-                close()
+            drawPath(outlinePath(corners), accent, style = Stroke(width = stroke))
+
+            val hs = handles(local, imgRect)
+            hs.forEachIndexed { i, p ->
+                val r = if (i < 4) 12.dp.toPx() else 8.dp.toPx()
+                drawCircle(Color.White, radius = r + 2.dp.toPx(), center = p)
+                drawCircle(accent, radius = r, center = p)
             }
-            drawPath(outline, accent, style = Stroke(width = 2.dp.toPx()))
-            pts.forEach {
-                drawCircle(Color.White, radius = 13.dp.toPx(), center = it)
-                drawCircle(accent, radius = 10.dp.toPx(), center = it)
+
+            // Magnifier
+            val a = active
+            if (a >= 0) {
+                val focus = hs[a]
+                val radius = 64.dp.toPx()
+                val margin = 12.dp.toPx()
+                val zoom = 3f
+                val centerX = if (focus.x < size.width / 2) size.width - margin - radius else margin + radius
+                val center = Offset(centerX, margin + radius)
+                val circle = Path().apply { addOval(Rect(center, radius)) }
+
+                drawCircle(Color.Black, radius = radius, center = center)
+                clipPath(circle) {
+                    withTransform({
+                        translate(center.x - focus.x, center.y - focus.y)
+                        scale(zoom, zoom, pivot = focus)
+                    }) {
+                        drawPhoto()
+                        drawPath(outlinePath(corners), accent, style = Stroke(width = stroke / zoom))
+                    }
+                    // Crosshair
+                    val gap = 6.dp.toPx()
+                    val len = radius
+                    val ch = 1.5.dp.toPx()
+                    listOf(Color.Black.copy(alpha = 0.6f) to ch * 2.2f, Color.White to ch).forEach { (col, wdt) ->
+                        drawLine(col, Offset(center.x - len, center.y), Offset(center.x - gap, center.y), wdt)
+                        drawLine(col, Offset(center.x + gap, center.y), Offset(center.x + len, center.y), wdt)
+                        drawLine(col, Offset(center.x, center.y - len), Offset(center.x, center.y - gap), wdt)
+                        drawLine(col, Offset(center.x, center.y + gap), Offset(center.x, center.y + len), wdt)
+                    }
+                }
+                drawCircle(Color.White, radius = radius, center = center, style = Stroke(width = 3.dp.toPx()))
             }
         }
     }

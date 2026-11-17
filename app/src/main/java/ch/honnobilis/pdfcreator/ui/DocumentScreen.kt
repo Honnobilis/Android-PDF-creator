@@ -23,7 +23,6 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -40,7 +39,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
@@ -64,7 +62,6 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -272,7 +269,7 @@ fun Badge(text: String) {
 @Composable
 private fun SaveDialog(vm: AppViewModel, onDismiss: () -> Unit) {
     val source = vm.source
-    var name by remember { mutableStateOf(vm.defaultFileName()) }
+    var name by remember { mutableStateOf(selectedAll(vm.defaultFileName())) }
     var overwrite by remember { mutableStateOf(false) }
     var qualityPos by remember {
         mutableFloatStateOf(vm.prefs.qualityIndex.coerceIn(0, Quality.entries.lastIndex).toFloat())
@@ -295,15 +292,7 @@ private fun SaveDialog(vm: AppViewModel, onDismiss: () -> Unit) {
                     ) { overwrite = true }
                 }
                 if (!overwrite) {
-                    OutlinedTextField(
-                        value = name,
-                        onValueChange = { name = it },
-                        label = { Text("File name") },
-                        suffix = { Text(".pdf") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    FileNameField(name, { name = it }, onDone = {})
                 }
 
                 if (vm.hasImagePages) {
@@ -338,9 +327,9 @@ private fun SaveDialog(vm: AppViewModel, onDismiss: () -> Unit) {
             TextButton(
                 onClick = {
                     onDismiss()
-                    vm.save(name, quality, ocr && ocrPages > 0, overwrite)
+                    vm.save(name.text.trim(), quality, ocr && ocrPages > 0, overwrite)
                 },
-                enabled = overwrite || name.isNotBlank(),
+                enabled = overwrite || name.text.isNotBlank(),
             ) { Text("Save") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },

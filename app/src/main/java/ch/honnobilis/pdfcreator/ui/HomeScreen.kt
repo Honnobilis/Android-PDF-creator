@@ -1,14 +1,17 @@
 package ch.honnobilis.pdfcreator.ui
 
 import android.graphics.Bitmap
+import android.net.Uri
 import android.text.format.Formatter
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,18 +29,24 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Checklist
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
@@ -49,7 +58,9 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -78,7 +89,22 @@ import java.util.Date
 fun HomeScreen(vm: AppViewModel) {
     val context = LocalContext.current
     var pendingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
-    var toDelete by remember { mutableStateOf<StoredPdf?>(null) }
+    var toDelete by remember { mutableStateOf<List<StoredPdf>>(emptyList()) }
+    var toRename by remember { mutableStateOf<StoredPdf?>(null) }
+
+    // Selection mode for batch actions. null = not selecting.
+    var selection by remember { mutableStateOf<Set<Uri>?>(null) }
+    val selecting = selection != null
+    fun toggle(pdf: StoredPdf) {
+        val s = selection ?: emptySet()
+        selection = if (pdf.uri in s) s - pdf.uri else s + pdf.uri
+    }
+    // Drop entries that no longer exist (deleted, or removed in a file manager).
+    LaunchedEffect(vm.history) {
+        selection = selection?.intersect(vm.history.map { it.uri }.toSet())
+    }
+    BackHandler(enabled = selecting) { selection = null }
+    val selectedPdfs = vm.history.filter { selection?.contains(it.uri) == true }
 
     /** Runs [action] right away, or after confirming that an unsaved document may be discarded. */
     fun startNew(action: () -> Unit) {
@@ -102,7 +128,35 @@ fun HomeScreen(vm: AppViewModel) {
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("PDF Creator") }) },
+        topBar = {
+            if (selecting) {
+                TopAppBar(
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    ),
+                    navigationIcon = {
+                        IconButton(onClick = { selection = null }) { Icon(Icons.Filled.Close, "Cancel selection") }
+                    },
+                    title = { Text("${selectedPdfs.size} selected") },
+                    actions = {
+                        IconButton(onClick = {
+                            selection = if (selectedPdfs.size == vm.history.size) emptySet()
+                            else vm.history.map { it.uri }.toSet()
+                        }) { Icon(Icons.Filled.SelectAll, "Select all") }
+                        IconButton(
+                            onClick = { sharePdfs(context, selectedPdfs.map { it.uri to it.name }) },
+                            enabled = selectedPdfs.isNotEmpty(),
+                        ) { Icon(Icons.Filled.Share, "Share selected") }
+                        IconButton(
+                            onClick = { toDelete = selectedPdfs },
+                            enabled = selectedPdfs.isNotEmpty(),
+                        ) { Icon(Icons.Filled.Delete, "Delete selected") }
+                    },
+                )
+            } else {
+                TopAppBar(title = { Text("PDF Creator") })
+            }
+        },
     ) { padding ->
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
@@ -113,50 +167,60 @@ fun HomeScreen(vm: AppViewModel) {
             ),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            item {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    ActionCard("Camera", Icons.Filled.CameraAlt, Modifier.weight(1f)) {
-                        startNew {
-                            vm.newDocument()
-                            vm.navigate(Screen.Camera())
-                        }
-                    }
-                    ActionCard("Gallery", Icons.Filled.PhotoLibrary, Modifier.weight(1f)) {
-                        startNew {
-                            pickImages.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                        }
-                    }
-                    ActionCard("Edit PDF", Icons.Filled.EditNote, Modifier.weight(1f)) {
-                        startNew { pickPdf.launch(arrayOf("application/pdf")) }
-                    }
-                }
-            }
-
-            if (vm.hasSession) {
+            if (!selecting) {
                 item {
-                    Card(
-                        onClick = { vm.navigate(Screen.Document) },
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text("Continue current document", fontWeight = FontWeight.SemiBold)
-                                val n = vm.pages.size
-                                Text(
-                                    (vm.source?.displayName?.let { "$it · " } ?: "") + "$n page" + if (n == 1) "" else "s",
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        ActionCard("Camera", Icons.Filled.CameraAlt, Modifier.weight(1f)) {
+                            startNew {
+                                vm.newDocument()
+                                vm.navigate(Screen.Camera())
                             }
-                            Icon(Icons.AutoMirrored.Filled.ArrowForward, null)
+                        }
+                        ActionCard("Gallery", Icons.Filled.PhotoLibrary, Modifier.weight(1f)) {
+                            startNew {
+                                pickImages.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                            }
+                        }
+                        ActionCard("Edit PDF", Icons.Filled.EditNote, Modifier.weight(1f)) {
+                            startNew { pickPdf.launch(arrayOf("application/pdf")) }
                         }
                     }
                 }
-            }
 
-            item {
-                Spacer(Modifier.height(8.dp))
-                Text("Recent PDFs", style = MaterialTheme.typography.titleMedium)
+                if (vm.hasSession) {
+                    item {
+                        Card(
+                            onClick = { vm.navigate(Screen.Document) },
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Continue current document", fontWeight = FontWeight.SemiBold)
+                                    val n = vm.pages.size
+                                    Text(
+                                        (vm.source?.displayName?.let { "$it · " } ?: "") + "$n page" + if (n == 1) "" else "s",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                                Icon(Icons.AutoMirrored.Filled.ArrowForward, null)
+                            }
+                        }
+                    }
+                }
+
+                item {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
+                        Text("Recent PDFs", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                        if (vm.history.isNotEmpty()) {
+                            TextButton(onClick = { selection = emptySet() }) {
+                                Icon(Icons.Filled.Checklist, null)
+                                Spacer(Modifier.width(6.dp))
+                                Text("Select")
+                            }
+                        }
+                    }
+                }
             }
 
             if (vm.history.isEmpty()) {
@@ -174,10 +238,14 @@ fun HomeScreen(vm: AppViewModel) {
                 HistoryRow(
                     vm = vm,
                     pdf = pdf,
-                    onOpen = { openPdf(context, pdf.uri) },
+                    selecting = selecting,
+                    selected = selection?.contains(pdf.uri) == true,
+                    onClick = { if (selecting) toggle(pdf) else openPdf(context, pdf.uri) },
+                    onLongClick = { if (selecting) toggle(pdf) else selection = setOf(pdf.uri) },
                     onShare = { sharePdf(context, pdf.uri, pdf.name) },
                     onEdit = { startNew { vm.openPdf(pdf.uri) } },
-                    onDelete = { toDelete = pdf },
+                    onRename = { toRename = pdf },
+                    onDelete = { toDelete = listOf(pdf) },
                 )
             }
         }
@@ -198,18 +266,38 @@ fun HomeScreen(vm: AppViewModel) {
         )
     }
 
-    toDelete?.let { pdf ->
+    if (toDelete.isNotEmpty()) {
+        val list = toDelete
         AlertDialog(
-            onDismissRequest = { toDelete = null },
-            title = { Text("Delete PDF?") },
-            text = { Text("\"${pdf.name}\" will be deleted from the phone.") },
+            onDismissRequest = { toDelete = emptyList() },
+            title = { Text(if (list.size == 1) "Delete PDF?" else "Delete ${list.size} PDFs?") },
+            text = {
+                Text(
+                    if (list.size == 1) "\"${list[0].name}\" will be deleted from the phone."
+                    else "The ${list.size} selected PDFs will be deleted from the phone.",
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
-                    vm.deleteStored(pdf)
-                    toDelete = null
+                    vm.deleteStored(list)
+                    toDelete = emptyList()
+                    selection = null
                 }) { Text("Delete") }
             },
-            dismissButton = { TextButton(onClick = { toDelete = null }) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = { toDelete = emptyList() }) { Text("Cancel") } },
+        )
+    }
+
+    toRename?.let { pdf ->
+        NameDialog(
+            title = "Rename PDF",
+            initial = pdf.name.removeSuffix(".pdf").removeSuffix(".PDF"),
+            confirmLabel = "Rename",
+            onDismiss = { toRename = null },
+            onConfirm = {
+                vm.renameStored(pdf, it)
+                toRename = null
+            },
         )
     }
 }
@@ -229,13 +317,18 @@ private fun ActionCard(label: String, icon: ImageVector, modifier: Modifier, onC
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun HistoryRow(
     vm: AppViewModel,
     pdf: StoredPdf,
-    onOpen: () -> Unit,
+    selecting: Boolean,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
     onShare: () -> Unit,
     onEdit: () -> Unit,
+    onRename: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -246,10 +339,14 @@ private fun HistoryRow(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .clickable(onClick = onOpen)
+            .background(if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(vertical = 6.dp, horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (selecting) {
+            Checkbox(checked = selected, onCheckedChange = { onClick() })
+        }
         Box(
             Modifier
                 .size(width = 44.dp, height = 58.dp)
@@ -264,6 +361,16 @@ private fun HistoryRow(
             } else {
                 Icon(Icons.Filled.PictureAsPdf, null, tint = MaterialTheme.colorScheme.primary)
             }
+            if (selected) {
+                Icon(
+                    Icons.Filled.CheckCircle, null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .size(16.dp)
+                        .background(Color.White, RoundedCornerShape(8.dp)),
+                )
+            }
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
@@ -275,25 +382,32 @@ private fun HistoryRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        IconButton(onClick = onShare) { Icon(Icons.Filled.Share, "Share") }
-        Box {
-            IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "More") }
-            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                DropdownMenuItem(
-                    text = { Text("Open") },
-                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.OpenInNew, null) },
-                    onClick = { menu = false; onOpen() },
-                )
-                DropdownMenuItem(
-                    text = { Text("Edit pages") },
-                    leadingIcon = { Icon(Icons.Filled.Edit, null) },
-                    onClick = { menu = false; onEdit() },
-                )
-                DropdownMenuItem(
-                    text = { Text("Delete") },
-                    leadingIcon = { Icon(Icons.Filled.Delete, null) },
-                    onClick = { menu = false; onDelete() },
-                )
+        if (!selecting) {
+            IconButton(onClick = onShare) { Icon(Icons.Filled.Share, "Share") }
+            Box {
+                IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "More") }
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Open") },
+                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.OpenInNew, null) },
+                        onClick = { menu = false; onClick() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Rename") },
+                        leadingIcon = { Icon(Icons.Filled.DriveFileRenameOutline, null) },
+                        onClick = { menu = false; onRename() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Edit pages") },
+                        leadingIcon = { Icon(Icons.Filled.Edit, null) },
+                        onClick = { menu = false; onEdit() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Delete") },
+                        leadingIcon = { Icon(Icons.Filled.Delete, null) },
+                        onClick = { menu = false; onDelete() },
+                    )
+                }
             }
         }
     }

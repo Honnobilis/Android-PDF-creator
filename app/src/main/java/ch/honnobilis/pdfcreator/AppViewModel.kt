@@ -440,11 +440,31 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun deleteStored(pdf: StoredPdf) {
+    fun deleteStored(pdfs: Collection<StoredPdf>) {
+        if (pdfs.isEmpty()) return
         viewModelScope.launch {
-            val ok = withContext(Dispatchers.IO) { runCatching { store.delete(pdf.uri) }.getOrDefault(false) }
-            if (!ok) message = "Could not delete ${pdf.name}"
-            historyThumbs.remove(pdf.uri)
+            val failed = withContext(Dispatchers.IO) {
+                pdfs.filterNot { runCatching { store.delete(it.uri) }.getOrDefault(false) }
+            }
+            when {
+                failed.size == 1 -> message = "Could not delete ${failed[0].name}"
+                failed.isNotEmpty() -> message = "Could not delete ${failed.size} files"
+                pdfs.size > 1 -> message = "${pdfs.size} PDFs deleted"
+            }
+            pdfs.forEach { historyThumbs.remove(it.uri) }
+            refreshHistory()
+        }
+    }
+
+    fun renameStored(pdf: StoredPdf, newName: String) {
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { store.rename(pdf.uri, newName) }
+                // Keep the editor title in sync if this file is open.
+                source?.let { if (it.uri == pdf.uri) source = it.copy(displayName = store.displayName(pdf.uri) ?: it.displayName) }
+            } catch (e: Throwable) {
+                message = "Could not rename: ${e.message ?: e.javaClass.simpleName}"
+            }
             refreshHistory()
         }
     }
