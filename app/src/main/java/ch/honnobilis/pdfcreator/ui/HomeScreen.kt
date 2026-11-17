@@ -91,6 +91,7 @@ fun HomeScreen(vm: AppViewModel) {
     var pendingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var toDelete by remember { mutableStateOf<List<StoredPdf>>(emptyList()) }
     var toRename by remember { mutableStateOf<StoredPdf?>(null) }
+    var confirmDiscard by remember { mutableStateOf(false) }
 
     // Selection mode for batch actions. null = not selecting.
     var selection by remember { mutableStateOf<Set<Uri>?>(null) }
@@ -203,6 +204,9 @@ fun HomeScreen(vm: AppViewModel) {
                                         style = MaterialTheme.typography.bodySmall,
                                     )
                                 }
+                                IconButton(onClick = {
+                                    if (vm.dirty) confirmDiscard = true else vm.discardSession()
+                                }) { Icon(Icons.Filled.Close, "Discard document") }
                                 Icon(Icons.AutoMirrored.Filled.ArrowForward, null)
                             }
                         }
@@ -285,6 +289,16 @@ fun HomeScreen(vm: AppViewModel) {
                 }) { Text("Delete") }
             },
             dismissButton = { TextButton(onClick = { toDelete = emptyList() }) { Text("Cancel") } },
+        )
+    }
+
+    if (confirmDiscard) {
+        DiscardDialog(
+            onDismiss = { confirmDiscard = false },
+            onDiscard = {
+                confirmDiscard = false
+                vm.discardSession()
+            },
         )
     }
 

@@ -32,6 +32,7 @@ import ch.honnobilis.pdfcreator.storage.PdfStore
 import ch.honnobilis.pdfcreator.storage.Prefs
 import com.tom_roush.pdfbox.pdmodel.encryption.InvalidPasswordException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -87,6 +88,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val importMutex = Mutex()
     private var saveJob: Job? = null
     private val pageJobs = HashMap<Long, Job>()
+    private val importJobs = mutableSetOf<Job>()
     /** Unrotated thumbnails of existing PDF pages. */
     private val pdfBaseThumbs = HashMap<Long, Bitmap>()
     private val historyThumbs = LruCache<Uri, Bitmap>(40)
@@ -128,6 +130,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private fun clearSession() {
         pageJobs.values.forEach { it.cancel() }
         pageJobs.clear()
+        importJobs.forEach { it.cancel() }
+        importJobs.clear()
         pages.clear()
         pdfBaseThumbs.clear()
         source = null
@@ -154,24 +158,28 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun enqueueImport(replaceId: Long?, decode: () -> Bitmap) {
         processingCount++
-        viewModelScope.launch {
-            importMutex.withLock {
-                try {
+        lateinit var job: Job
+        job = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            try {
+                importMutex.withLock {
                     val page = withContext(Dispatchers.Default) {
                         createImagePage(replaceId ?: ids.getAndIncrement(), decode(), detect = true, FilterMode.AUTO)
                     }
                     val idx = pages.indexOfFirst { it.id == page.id }
                     if (idx >= 0) pages[idx] = page else pages.add(page)
                     dirty = true
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Throwable) {
-                    message = "Could not load a photo: ${e.message ?: e.javaClass.simpleName}"
-                } finally {
-                    processingCount--
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                message = "Could not load a photo: ${e.message ?: e.javaClass.simpleName}"
+            } finally {
+                processingCount--
+                importJobs.remove(job)
             }
         }
+        importJobs += job
+        job.start()
     }
 
     private fun createImagePage(id: Long, bitmap: Bitmap, detect: Boolean, filter: FilterMode): ImagePage {

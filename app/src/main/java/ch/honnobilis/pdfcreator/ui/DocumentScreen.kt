@@ -27,6 +27,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.AlertDialog
@@ -80,6 +81,7 @@ import kotlin.math.roundToInt
 @Composable
 fun DocumentScreen(vm: AppViewModel) {
     var showSave by remember { mutableStateOf(false) }
+    var showDiscard by remember { mutableStateOf(false) }
     val pickImages = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
         if (uris.isNotEmpty()) vm.addFromGallery(uris)
     }
@@ -102,6 +104,9 @@ fun DocumentScreen(vm: AppViewModel) {
                     }
                 },
                 actions = {
+                    IconButton(onClick = {
+                        if (vm.dirty) showDiscard = true else vm.discardSession()
+                    }) { Icon(Icons.Filled.DeleteForever, "Discard document") }
                     TextButton(
                         onClick = { showSave = true },
                         enabled = vm.pages.isNotEmpty() && vm.processingCount == 0,
@@ -169,6 +174,16 @@ fun DocumentScreen(vm: AppViewModel) {
 
     if (showSave) {
         SaveDialog(vm, onDismiss = { showSave = false })
+    }
+
+    if (showDiscard) {
+        DiscardDialog(
+            onDismiss = { showDiscard = false },
+            onDiscard = {
+                showDiscard = false
+                vm.discardSession()
+            },
+        )
     }
 }
 
@@ -355,3 +370,14 @@ private fun ChoiceRow(label: String, selected: Boolean, enabled: Boolean = true,
 }
 
 private fun formatKb(kb: Int): String = if (kb >= 1000) "%.1f MB".format(kb / 1000f) else "$kb KB"
+
+@Composable
+fun DiscardDialog(onDismiss: () -> Unit, onDiscard: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Discard document?") },
+        text = { Text("All unsaved changes and pages will be lost. Saved PDFs are not affected.") },
+        confirmButton = { TextButton(onClick = onDiscard) { Text("Discard") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
