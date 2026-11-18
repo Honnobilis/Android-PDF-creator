@@ -51,8 +51,20 @@ sealed interface Screen {
     data object Home : Screen
     data object Document : Screen
     data class PageEdit(val pageId: Long) : Screen
-    /** [replacePageId] set = retake a single page. */
-    data class Camera(val replacePageId: Long? = null) : Screen
+    /**
+     * [replacePageId] set = retake a single page.
+     * [insertAfterPageId] set = new photos go right after that page instead of at the end.
+     */
+    data class Camera(val replacePageId: Long? = null, val insertAfterPageId: Long? = null) : Screen
+}
+
+/**
+ * Where a series of new pages goes: each one right after the previous one,
+ * starting after [afterId]. null = append at the end.
+ */
+class InsertCursor(var afterId: Long?) {
+    /** First page inserted through this cursor. */
+    var firstInsertedId: Long? = null
 }
 
 data class SaveProgress(val done: Int, val total: Int, val message: String)
@@ -109,7 +121,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Returns false when the caller should leave the app. */
     fun back(): Boolean {
         when (val s = screen) {
-            is Screen.Camera -> screen = if (s.replacePageId != null) Screen.PageEdit(s.replacePageId) else Screen.Document
+            is Screen.Camera -> screen = when {
+                s.replacePageId != null && page(s.replacePageId) != null -> Screen.PageEdit(s.replacePageId)
+                s.insertAfterPageId != null && page(s.insertAfterPageId) != null -> Screen.PageEdit(s.insertAfterPageId)
+                else -> Screen.Document
+            }
             is Screen.PageEdit -> screen = Screen.Document
             Screen.Document -> screen = Screen.Home
             Screen.Home -> return false
@@ -143,12 +159,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // --- adding photos --------------------------------------------------------------------
-    fun addFromGallery(uris: List<Uri>) {
-        uris.forEach { uri -> enqueueImport(null) { BitmapIO.decode(ctx, uri, SOURCE_MAX) } }
+    /** Adds photos at the end, or after [insertAfterPageId] in the order picked. */
+    fun addFromGallery(uris: List<Uri>, insertAfterPageId: Long? = null) {
+        val cursor = InsertCursor(insertAfterPageId)
+        uris.forEach { uri -> enqueueImport(null, cursor) { BitmapIO.decode(ctx, uri, SOURCE_MAX) } }
     }
 
-    fun addCapturedPhoto(file: File, replacePageId: Long?) {
-        enqueueImport(replacePageId) {
+    fun addCapturedPhoto(file: File, replacePageId: Long?, cursor: InsertCursor) {
+        enqueueImport(replacePageId, cursor) {
             try {
                 BitmapIO.decode(ctx, Uri.fromFile(file), SOURCE_MAX)
             } finally {
@@ -159,7 +177,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun newCaptureFile(): File = File(File(ctx.cacheDir, "capture").apply { mkdirs() }, "${System.nanoTime()}.jpg")
 
-    private fun enqueueImport(replaceId: Long?, decode: () -> Bitmap) {
+    private fun enqueueImport(replaceId: Long?, cursor: InsertCursor, decode: () -> Bitmap) {
         processingCount++
         lateinit var job: Job
         job = viewModelScope.launch(start = CoroutineStart.LAZY) {
@@ -169,7 +187,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         createImagePage(replaceId ?: ids.getAndIncrement(), decode(), detect = true, FilterMode.AUTO)
                     }
                     val idx = pages.indexOfFirst { it.id == page.id }
-                    if (idx >= 0) pages[idx] = page else pages.add(page)
+                    if (idx >= 0) {
+                        pages[idx] = page
+                    } else {
+                        val anchor = cursor.afterId?.let { a -> pages.indexOfFirst { it.id == a } } ?: -1
+                        if (anchor >= 0) pages.add(anchor + 1, page) else pages.add(page)
+                        if (cursor.afterId != null) cursor.afterId = page.id
+                        if (cursor.firstInsertedId == null) cursor.firstInsertedId = page.id
+                    }
                     dirty = true
                 }
             } catch (e: CancellationException) {

@@ -1,6 +1,14 @@
 package ch.honnobilis.pdfcreator.ui
 
 import android.graphics.Bitmap
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material.icons.filled.AddAPhoto
+import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -115,6 +123,13 @@ fun PageEditScreen(vm: AppViewModel, pageId: Long) {
     // Page that is currently zoomed in; swiping is paused while it is shown.
     var zoomedPageId by remember { mutableStateOf<Long?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var addMenu by remember { mutableStateOf(false) }
+    var galleryAnchor by remember { mutableStateOf<Long?>(null) }
+    val pickImages = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
+        val anchor = galleryAnchor
+        if (uris.isNotEmpty() && anchor != null) vm.addFromGallery(uris, insertAfterPageId = anchor)
+        galleryAnchor = null
+    }
 
     Scaffold(
         topBar = {
@@ -132,9 +147,40 @@ fun PageEditScreen(vm: AppViewModel, pageId: Long) {
                         onClick = { scope.launch { pager.animateScrollToPage(pager.currentPage + 1) } },
                         enabled = pager.currentPage < vm.pages.lastIndex,
                     ) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "Next page") }
-                    if (current is ImagePage) {
-                        IconButton(onClick = { vm.navigate(Screen.Camera(replacePageId = current.id)) }) {
-                            Icon(Icons.Filled.CameraAlt, "Retake")
+                    if (current != null) {
+                        Box {
+                            IconButton(onClick = { addMenu = true }) {
+                                Icon(Icons.Filled.CameraAlt, "Retake or insert pages")
+                            }
+                            DropdownMenu(expanded = addMenu, onDismissRequest = { addMenu = false }) {
+                                if (current is ImagePage) {
+                                    DropdownMenuItem(
+                                        text = { Text("Retake this page") },
+                                        leadingIcon = { Icon(Icons.Filled.Cameraswitch, null) },
+                                        onClick = {
+                                            addMenu = false
+                                            vm.navigate(Screen.Camera(replacePageId = current.id))
+                                        },
+                                    )
+                                }
+                                DropdownMenuItem(
+                                    text = { Text("Insert photos after this page") },
+                                    leadingIcon = { Icon(Icons.Filled.AddAPhoto, null) },
+                                    onClick = {
+                                        addMenu = false
+                                        vm.navigate(Screen.Camera(insertAfterPageId = current.id))
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Insert from gallery after this page") },
+                                    leadingIcon = { Icon(Icons.Filled.AddPhotoAlternate, null) },
+                                    onClick = {
+                                        addMenu = false
+                                        galleryAnchor = current.id
+                                        pickImages.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                    },
+                                )
+                            }
                         }
                     }
                     IconButton(onClick = { confirmDelete = true }) { Icon(Icons.Filled.Delete, "Delete page") }

@@ -42,7 +42,7 @@ fun AppRoot(vm: AppViewModel) {
         Screen.Home -> HomeScreen(vm)
         Screen.Document -> DocumentScreen(vm)
         is Screen.PageEdit -> PageEditScreen(vm, s.pageId)
-        is Screen.Camera -> CameraScreen(vm, s.replacePageId)
+        is Screen.Camera -> CameraScreen(vm, s.replacePageId, s.insertAfterPageId)
     }
 
     vm.busyMessage?.let { msg ->
