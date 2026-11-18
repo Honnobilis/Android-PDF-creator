@@ -11,7 +11,8 @@ Turn photos of documents into PDFs – one photo per page – and edit existing 
 - **Page size** follows the cropped photo (long side = A4 long side).
 - **Quality slider** (Small … Maximum) for photo pages.
 - **OCR** (Tesseract, offline, German + English): adds an invisible text layer so the PDF is searchable. Switch in the save dialog, off by default.
-- **Edit existing PDFs**: add pages (camera/gallery), delete, reorder, rotate.
+- **Edit existing PDFs**: add pages (camera/gallery/another PDF), delete, reorder, rotate.
+- **Insert pages from other PDFs**: at the end or after the current page; combine several PDFs into one.
   - *Scanned* pages can be converted to editable photo pages (crop, filters) and get OCR.
   - *Digital* pages (real text) can only be moved, rotated or deleted.
   - Save as a new file (default) or overwrite the original.

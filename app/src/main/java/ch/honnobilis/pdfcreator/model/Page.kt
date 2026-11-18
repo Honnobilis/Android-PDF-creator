@@ -4,6 +4,8 @@ import android.graphics.Bitmap
 import android.net.Uri
 import java.io.File
 
+const val DEFAULT_STRENGTH = 0.5f
+
 enum class FilterMode(val label: String) {
     AUTO("Auto"),
     ORIGINAL("Original"),
@@ -56,6 +58,8 @@ data class ImagePage(
     /** What AUTO resolves to for this page (computed from the cropped image). */
     val autoFilter: FilterMode,
     override val thumbnail: Bitmap?,
+    /** Filter strength 0..1 (see ImageProcessor.applyFilter). */
+    val strength: Float = DEFAULT_STRENGTH,
 ) : PageItem {
     val effectiveFilter: FilterMode
         get() = if (filter == FilterMode.AUTO) autoFilter else filter
@@ -63,10 +67,12 @@ data class ImagePage(
 
 enum class PdfPageKind { SCANNED, DIGITAL }
 
-/** An untouched page of an existing PDF that is being edited. */
+/** An untouched page of an existing PDF (the one being edited, or one inserted into it). */
 data class PdfPage(
     override val id: Long,
-    /** Index of the page in the source PDF. */
+    /** Private copy of the PDF this page comes from. */
+    val sourceFile: File,
+    /** Index of the page in that PDF. */
     val index: Int,
     val kind: PdfPageKind,
     /** Scanned page that already carries an (invisible) OCR text layer. */

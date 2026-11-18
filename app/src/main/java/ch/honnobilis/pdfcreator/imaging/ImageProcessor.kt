@@ -21,12 +21,12 @@ object ImageProcessor {
 
     /**
      * Full pipeline: perspective crop → downscale to [maxSide] → rotate → filter.
-     * [filter] must already be resolved (not AUTO). Never recycles [source].
+     * [filter] must already be resolved (not AUTO); [strength] is 0..1. Never recycles [source].
      */
-    fun render(source: Bitmap, quad: Quad, rotation: Int, filter: FilterMode, maxSide: Int): Bitmap {
+    fun render(source: Bitmap, quad: Quad, rotation: Int, filter: FilterMode, strength: Float, maxSide: Int): Bitmap {
         var bmp = if (quad.isFull) BitmapIO.scaledCopy(source, maxSide) else BitmapIO.scaleToMax(warp(source, quad), maxSide)
         bmp = BitmapIO.rotate(bmp, rotation)
-        return applyFilter(bmp, filter)
+        return applyFilter(bmp, filter, strength)
     }
 
     /** Perspective-corrects [source] to the quad. Returns a new bitmap. */
@@ -58,24 +58,39 @@ object ImageProcessor {
         return out
     }
 
-    /** Applies a resolved filter. May return the same instance (ORIGINAL); otherwise recycles the input. */
-    fun applyFilter(bmp: Bitmap, mode: FilterMode): Bitmap {
+    /**
+     * Applies a resolved filter. May return the same instance (ORIGINAL); otherwise recycles the input.
+     *
+     * [strength] (0..1):
+     *  - Colour / Gray: blend between the plain image (0) and the fully cleaned-up,
+     *    high-contrast version (1).
+     *  - B&W: how aggressively faint marks are turned white. Low keeps fine strokes
+     *    (and some noise), high gives a clean white background.
+     */
+    fun applyFilter(bmp: Bitmap, mode: FilterMode, strength: Float): Bitmap {
         if (mode == FilterMode.ORIGINAL || mode == FilterMode.AUTO) return bmp
+        val s = strength.coerceIn(0f, 1f).toDouble()
         val rgba = Mat()
         Utils.bitmapToMat(bmp, rgba)
         val result = when (mode) {
-            FilterMode.COLOR -> enhanceColor(rgba)
+            FilterMode.COLOR -> {
+                val enhanced = enhanceColor(rgba)
+                blend(rgba, enhanced, s)
+            }
             FilterMode.GRAY -> {
-                val n = normalizedGray(rgba)
+                val plain = Mat()
+                Imgproc.cvtColor(rgba, plain, Imgproc.COLOR_RGBA2GRAY)
+                val n = normalizeBackground(plain)
                 n.convertTo(n, -1, 1.1, -12.0)
-                toRgba(n)
+                toRgba(blend(plain, n, s)).also { plain.release() }
             }
             FilterMode.BW -> {
                 val n = normalizedGray(rgba)
                 val bw = Mat()
                 val block = (min(n.cols(), n.rows()) / 24).coerceAtLeast(15) or 1
+                val c = 3.0 + 22.0 * s
                 Imgproc.adaptiveThreshold(
-                    n, bw, 255.0, Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C, Imgproc.THRESH_BINARY, block, 14.0,
+                    n, bw, 255.0, Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C, Imgproc.THRESH_BINARY, block, c,
                 )
                 n.release()
                 toRgba(bw)
@@ -87,6 +102,14 @@ object ImageProcessor {
         Utils.matToBitmap(result, out)
         result.release()
         bmp.recycle()
+        return out
+    }
+
+    /** a·(1-s) + b·s. Releases [b] (not [a]); returns a new Mat. */
+    private fun blend(a: Mat, b: Mat, s: Double): Mat {
+        val out = Mat()
+        Core.addWeighted(a, 1.0 - s, b, s, 0.0, out)
+        b.release()
         return out
     }
 

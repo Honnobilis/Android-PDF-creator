@@ -1,6 +1,15 @@
 package ch.honnobilis.pdfcreator.ui
 
 import android.graphics.Bitmap
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material.icons.filled.AddAPhoto
+import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -16,6 +25,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.RotateLeft
@@ -46,6 +63,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -81,13 +99,46 @@ import kotlin.math.min
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PageEditScreen(vm: AppViewModel, pageId: Long) {
-    val page = vm.page(pageId)
-    LaunchedEffect(page == null) {
-        if (page == null) vm.navigate(Screen.Document)
+    val startIndex = vm.pages.indexOfFirst { it.id == pageId }
+    LaunchedEffect(startIndex < 0) {
+        if (startIndex < 0) vm.navigate(Screen.Document)
     }
-    if (page == null) return
-    val number = vm.pages.indexOfFirst { it.id == pageId } + 1
+    if (startIndex < 0 || vm.pages.isEmpty()) return
+
+    // Crop mode is shared by all pages; swiping is disabled while cropping
+    // so that dragging a corner never turns the page.
+    var cropMode by remember { mutableStateOf(false) }
+    val pager = rememberPagerState(initialPage = startIndex) { vm.pages.size }
+    val scope = rememberCoroutineScope()
+
+    // Keep the screen's page id in sync (used by retake / back navigation).
+    val currentId = vm.pages.getOrNull(pager.currentPage)?.id
+    LaunchedEffect(currentId) {
+        if (currentId != null && currentId != pageId) vm.navigate(Screen.PageEdit(currentId))
+    }
+    // Follow external changes (e.g. after deleting a page).
+    LaunchedEffect(pageId) {
+        val i = vm.pages.indexOfFirst { it.id == pageId }
+        if (i >= 0 && i != pager.currentPage) pager.scrollToPage(i)
+    }
+
+    val current = vm.pages.getOrNull(pager.currentPage)
+    // Page that is currently zoomed in; swiping is paused while it is shown.
+    var zoomedPageId by remember { mutableStateOf<Long?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var addMenu by remember { mutableStateOf(false) }
+    var galleryAnchor by remember { mutableStateOf<Long?>(null) }
+    var pdfAnchor by remember { mutableStateOf<Long?>(null) }
+    val pickPdf = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val anchor = pdfAnchor
+        if (uri != null && anchor != null) vm.insertPdf(uri, afterPageId = anchor)
+        pdfAnchor = null
+    }
+    val pickImages = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
+        val anchor = galleryAnchor
+        if (uris.isNotEmpty() && anchor != null) vm.addFromGallery(uris, insertAfterPageId = anchor)
+        galleryAnchor = null
+    }
 
     Scaffold(
         topBar = {
@@ -95,11 +146,59 @@ fun PageEditScreen(vm: AppViewModel, pageId: Long) {
                 navigationIcon = {
                     IconButton(onClick = { vm.back() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
                 },
-                title = { Text("Page $number of ${vm.pages.size}") },
+                title = { Text("Page ${pager.currentPage + 1} of ${vm.pages.size}") },
                 actions = {
-                    if (page is ImagePage) {
-                        IconButton(onClick = { vm.navigate(Screen.Camera(replacePageId = page.id)) }) {
-                            Icon(Icons.Filled.CameraAlt, "Retake")
+                    IconButton(
+                        onClick = { scope.launch { pager.animateScrollToPage(pager.currentPage - 1) } },
+                        enabled = pager.currentPage > 0,
+                    ) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "Previous page") }
+                    IconButton(
+                        onClick = { scope.launch { pager.animateScrollToPage(pager.currentPage + 1) } },
+                        enabled = pager.currentPage < vm.pages.lastIndex,
+                    ) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "Next page") }
+                    if (current != null) {
+                        Box {
+                            IconButton(onClick = { addMenu = true }) {
+                                Icon(Icons.Filled.CameraAlt, "Retake or insert pages")
+                            }
+                            DropdownMenu(expanded = addMenu, onDismissRequest = { addMenu = false }) {
+                                if (current is ImagePage) {
+                                    DropdownMenuItem(
+                                        text = { Text("Retake this page") },
+                                        leadingIcon = { Icon(Icons.Filled.Cameraswitch, null) },
+                                        onClick = {
+                                            addMenu = false
+                                            vm.navigate(Screen.Camera(replacePageId = current.id))
+                                        },
+                                    )
+                                }
+                                DropdownMenuItem(
+                                    text = { Text("Insert photos after this page") },
+                                    leadingIcon = { Icon(Icons.Filled.AddAPhoto, null) },
+                                    onClick = {
+                                        addMenu = false
+                                        vm.navigate(Screen.Camera(insertAfterPageId = current.id))
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Insert from gallery after this page") },
+                                    leadingIcon = { Icon(Icons.Filled.AddPhotoAlternate, null) },
+                                    onClick = {
+                                        addMenu = false
+                                        galleryAnchor = current.id
+                                        pickImages.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Insert PDF after this page") },
+                                    leadingIcon = { Icon(Icons.Filled.PictureAsPdf, null) },
+                                    onClick = {
+                                        addMenu = false
+                                        pdfAnchor = current.id
+                                        pickPdf.launch(arrayOf("application/pdf"))
+                                    },
+                                )
+                            }
                         }
                     }
                     IconButton(onClick = { confirmDelete = true }) { Icon(Icons.Filled.Delete, "Delete page") }
@@ -107,22 +206,55 @@ fun PageEditScreen(vm: AppViewModel, pageId: Long) {
             )
         },
     ) { padding ->
-        Box(Modifier.padding(padding)) {
-            when (page) {
-                is ImagePage -> ImagePageEditor(vm, page)
-                is PdfPage -> PdfPageEditor(vm, page)
+        Column(Modifier.padding(padding)) {
+            if (current is ImagePage) {
+                SingleChoiceSegmentedButtonRow(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                ) {
+                    SegmentedButton(
+                        selected = cropMode,
+                        onClick = { cropMode = true },
+                        shape = SegmentedButtonDefaults.itemShape(0, 2),
+                        icon = { Icon(Icons.Filled.Crop, null) },
+                    ) { Text("Crop") }
+                    SegmentedButton(
+                        selected = !cropMode,
+                        onClick = { cropMode = false },
+                        shape = SegmentedButtonDefaults.itemShape(1, 2),
+                        icon = { Icon(Icons.Filled.Tune, null) },
+                    ) { Text("Result") }
+                }
+            }
+            HorizontalPager(
+                state = pager,
+                key = { i -> vm.pages.getOrNull(i)?.id ?: i },
+                userScrollEnabled = !(cropMode && current is ImagePage) && zoomedPageId != current?.id,
+                modifier = Modifier.weight(1f),
+            ) { i ->
+                when (val page = vm.pages.getOrNull(i)) {
+                    is ImagePage -> ImagePageEditor(vm, page, cropMode) { zoomed ->
+                        if (zoomed) zoomedPageId = page.id else if (zoomedPageId == page.id) zoomedPageId = null
+                    }
+                    is PdfPage -> PdfPageEditor(vm, page) { zoomed ->
+                        if (zoomed) zoomedPageId = page.id else if (zoomedPageId == page.id) zoomedPageId = null
+                    }
+                    null -> Unit
+                }
             }
         }
     }
 
-    if (confirmDelete) {
+    if (confirmDelete && current != null) {
+        val number = pager.currentPage + 1
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
             title = { Text("Delete page $number?") },
             confirmButton = {
                 TextButton(onClick = {
                     confirmDelete = false
-                    vm.deletePage(pageId)
+                    vm.deletePage(current.id)
                 }) { Text("Delete") }
             },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
@@ -134,37 +266,50 @@ fun PageEditScreen(vm: AppViewModel, pageId: Long) {
 // Photo pages: crop + rotate + filter
 // ---------------------------------------------------------------------------------------
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ImagePageEditor(vm: AppViewModel, page: ImagePage) {
-    var cropMode by remember(page.id) { mutableIntStateOf(1) } // 0 = crop, 1 = result
-
+private fun ImagePageEditor(vm: AppViewModel, page: ImagePage, cropMode: Boolean, onZoomedChange: (Boolean) -> Unit) {
     val preview by produceState<Bitmap?>(null, page.previewFile) { value = vm.loadPreview(page) }
-    val result by produceState<Bitmap?>(null, preview, page.quad, page.rotation, page.effectiveFilter) {
+    val effective = page.effectiveFilter
+    // Colour/Gray: two layers (strength 0 and 1) blended on screen → slider is instant.
+    val layered = effective == FilterMode.COLOR || effective == FilterMode.GRAY
+    // Strength while the slider is being dragged.
+    var live by remember(page.id) { mutableStateOf<Float?>(null) }
+
+    val layers by produceState<Pair<Bitmap, Bitmap>?>(null, layered, preview, page.quad, page.rotation, effective) {
         val p = preview
-        value = if (p != null) vm.renderResult(page, p) else null
+        value = if (layered && p != null) vm.renderLayers(page, p) else null
+    }
+    // Other filters: one rendered image, tagged with the strength it was made with.
+    val result by produceState<Pair<Float, Bitmap>?>(null, layered, preview, page.quad, page.rotation, effective, page.strength) {
+        val p = preview
+        if (!layered && p != null) value = page.strength to vm.renderResult(page, p)
+    }
+    // B&W while dragging: smaller renders, never more than one at a time.
+    var liveBw by remember(page.id) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(page.id, preview, page.quad, page.rotation, effective) {
+        snapshotFlow { live }.conflate().collect { l ->
+            val p = preview
+            if (effective == FilterMode.BW && l != null && p != null) liveBw = vm.renderLive(page, p, l)
+        }
+    }
+
+    var zoom by remember(page.id) { mutableFloatStateOf(1f) }
+    val wantSharp = zoom > 1.3f && !cropMode
+    // Sharper versions from the full-resolution photo, only while zoomed in.
+    val sharpLayers by produceState<Pair<Bitmap, Bitmap>?>(null, wantSharp && layered, page.quad, page.rotation, effective) {
+        value = null
+        if (wantSharp && layered) value = vm.renderLayersSharp(page)
+    }
+    val sharp by produceState<Bitmap?>(null, wantSharp && !layered, page.quad, page.rotation, effective, page.strength) {
+        value = null
+        if (wantSharp && !layered) value = vm.renderResultSharp(page)
+    }
+    val onScale: (Float) -> Unit = {
+        zoom = it
+        onZoomedChange(it > 1.01f)
     }
 
     Column(Modifier.fillMaxSize()) {
-        SingleChoiceSegmentedButtonRow(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-        ) {
-            SegmentedButton(
-                selected = cropMode == 0,
-                onClick = { cropMode = 0 },
-                shape = SegmentedButtonDefaults.itemShape(0, 2),
-                icon = { Icon(Icons.Filled.Crop, null) },
-            ) { Text("Crop") }
-            SegmentedButton(
-                selected = cropMode == 1,
-                onClick = { cropMode = 1 },
-                shape = SegmentedButtonDefaults.itemShape(1, 2),
-                icon = { Icon(Icons.Filled.Tune, null) },
-            ) { Text("Result") }
-        }
-
         Box(
             Modifier
                 .weight(1f)
@@ -173,19 +318,41 @@ private fun ImagePageEditor(vm: AppViewModel, page: ImagePage) {
             contentAlignment = Alignment.Center,
         ) {
             val p = preview
-            if (cropMode == 0 && p != null) {
+            if (cropMode && p != null) {
                 CropEditor(p, page.quad) { vm.setQuad(page.id, it) }
             } else {
+                val strength = live ?: page.strength
+                val l = sharpLayers ?: layers
                 val r = result
-                if (r != null) {
-                    Image(r.asImageBitmap(), "Result", contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+                val showLiveBw = effective == FilterMode.BW && liveBw != null &&
+                    (live != null || r == null || r.first != page.strength)
+                val single = when {
+                    showLiveBw -> liveBw
+                    else -> sharp ?: r?.second
+                }
+                if (layered && l != null) {
+                    ZoomableImage(
+                        bitmap = l.first,
+                        overlay = l.second,
+                        overlayAlpha = strength,
+                        contentDescription = "Result",
+                        onScaleChange = onScale,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else if (!layered && single != null) {
+                    ZoomableImage(
+                        bitmap = single,
+                        contentDescription = "Result",
+                        onScaleChange = onScale,
+                        modifier = Modifier.fillMaxSize(),
+                    )
                 } else {
                     CircularProgressIndicator()
                 }
             }
         }
 
-        if (cropMode == 0) {
+        if (cropMode) {
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -204,28 +371,23 @@ private fun ImagePageEditor(vm: AppViewModel, page: ImagePage) {
                 }
             }
         } else {
+            FilterChips(
+                selected = page.filter,
+                autoResult = page.autoFilter,
+                onSelect = { vm.setFilter(page.id, it) },
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+            )
+            StrengthSlider(
+                effective = page.effectiveFilter,
+                strength = page.strength,
+                onChange = { vm.setStrength(page.id, it) },
+                onLiveChange = { live = it },
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                FilterMode.entries.forEach { mode ->
-                    FilterChip(
-                        selected = page.filter == mode,
-                        onClick = { vm.setFilter(page.id, mode) },
-                        label = {
-                            Text(if (mode == FilterMode.AUTO) "Auto · ${page.autoFilter.label}" else mode.label)
-                        },
-                    )
-                }
-            }
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    .padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
             ) {
                 RotateButtons(Modifier.weight(1f), onLeft = { vm.rotate(page.id, -90) }, onRight = { vm.rotate(page.id, 90) })
             }
@@ -399,8 +561,14 @@ private fun CropEditor(bitmap: Bitmap, quad: Quad, onChange: (Quad) -> Unit) {
 // ---------------------------------------------------------------------------------------
 
 @Composable
-private fun PdfPageEditor(vm: AppViewModel, page: PdfPage) {
+private fun PdfPageEditor(vm: AppViewModel, page: PdfPage, onZoomedChange: (Boolean) -> Unit) {
     val rendered by produceState<Bitmap?>(null, page.index, page.extraRotation) { value = vm.renderPdfPage(page) }
+    var zoom by remember(page.id) { mutableFloatStateOf(1f) }
+    val wantSharp = zoom > 1.3f
+    val sharp by produceState<Bitmap?>(null, wantSharp, page.index, page.extraRotation) {
+        value = null
+        if (wantSharp) value = vm.renderPdfPage(page, sharp = true)
+    }
 
     Column(Modifier.fillMaxSize()) {
         Box(
@@ -410,9 +578,17 @@ private fun PdfPageEditor(vm: AppViewModel, page: PdfPage) {
                 .padding(16.dp),
             contentAlignment = Alignment.Center,
         ) {
-            val r = rendered
+            val r = sharp ?: rendered
             if (r != null) {
-                Image(r.asImageBitmap(), null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+                ZoomableImage(
+                    bitmap = r,
+                    contentDescription = "Page",
+                    onScaleChange = {
+                        zoom = it
+                        onZoomedChange(it > 1.01f)
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
             } else {
                 CircularProgressIndicator()
             }

@@ -37,6 +37,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -49,8 +51,20 @@ sealed interface Screen {
     data object Home : Screen
     data object Document : Screen
     data class PageEdit(val pageId: Long) : Screen
-    /** [replacePageId] set = retake a single page. */
-    data class Camera(val replacePageId: Long? = null) : Screen
+    /**
+     * [replacePageId] set = retake a single page.
+     * [insertAfterPageId] set = new photos go right after that page instead of at the end.
+     */
+    data class Camera(val replacePageId: Long? = null, val insertAfterPageId: Long? = null) : Screen
+}
+
+/**
+ * Where a series of new pages goes: each one right after the previous one,
+ * starting after [afterId]. null = append at the end.
+ */
+class InsertCursor(var afterId: Long?) {
+    /** First page inserted through this cursor. */
+    var firstInsertedId: Long? = null
 }
 
 data class SaveProgress(val done: Int, val total: Int, val message: String)
@@ -89,6 +103,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var saveJob: Job? = null
     private val pageJobs = HashMap<Long, Job>()
     private val importJobs = mutableSetOf<Job>()
+    private val thumbSemaphore = Semaphore(2)
     /** Unrotated thumbnails of existing PDF pages. */
     private val pdfBaseThumbs = HashMap<Long, Bitmap>()
     private val historyThumbs = LruCache<Uri, Bitmap>(40)
@@ -106,7 +121,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Returns false when the caller should leave the app. */
     fun back(): Boolean {
         when (val s = screen) {
-            is Screen.Camera -> screen = if (s.replacePageId != null) Screen.PageEdit(s.replacePageId) else Screen.Document
+            is Screen.Camera -> screen = when {
+                s.replacePageId != null && page(s.replacePageId) != null -> Screen.PageEdit(s.replacePageId)
+                s.insertAfterPageId != null && page(s.insertAfterPageId) != null -> Screen.PageEdit(s.insertAfterPageId)
+                else -> Screen.Document
+            }
             is Screen.PageEdit -> screen = Screen.Document
             Screen.Document -> screen = Screen.Home
             Screen.Home -> return false
@@ -140,12 +159,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // --- adding photos --------------------------------------------------------------------
-    fun addFromGallery(uris: List<Uri>) {
-        uris.forEach { uri -> enqueueImport(null) { BitmapIO.decode(ctx, uri, SOURCE_MAX) } }
+    /** Adds photos at the end, or after [insertAfterPageId] in the order picked. */
+    fun addFromGallery(uris: List<Uri>, insertAfterPageId: Long? = null) {
+        val cursor = InsertCursor(insertAfterPageId)
+        // Inserting from the page editor: show the first new page once it is ready.
+        if (insertAfterPageId != null) focusCursor = cursor
+        uris.forEach { uri -> enqueueImport(null, cursor) { BitmapIO.decode(ctx, uri, SOURCE_MAX) } }
     }
 
-    fun addCapturedPhoto(file: File, replacePageId: Long?) {
-        enqueueImport(replacePageId) {
+    fun addCapturedPhoto(file: File, replacePageId: Long?, cursor: InsertCursor) {
+        enqueueImport(replacePageId, cursor) {
             try {
                 BitmapIO.decode(ctx, Uri.fromFile(file), SOURCE_MAX)
             } finally {
@@ -154,9 +177,23 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Pending "jump to the first inserted page" request. */
+    private var focusCursor: InsertCursor? = null
+
+    /**
+     * Opens the page editor on the first page inserted through [cursor]; if that page
+     * is still being processed, on [fallbackId] now and on the new page once it is ready.
+     */
+    fun showFirstInserted(cursor: InsertCursor, fallbackId: Long) {
+        val first = cursor.firstInsertedId
+        val target = first ?: fallbackId
+        screen = if (page(target) != null) Screen.PageEdit(target) else Screen.Document
+        focusCursor = if (first == null) cursor else null
+    }
+
     fun newCaptureFile(): File = File(File(ctx.cacheDir, "capture").apply { mkdirs() }, "${System.nanoTime()}.jpg")
 
-    private fun enqueueImport(replaceId: Long?, decode: () -> Bitmap) {
+    private fun enqueueImport(replaceId: Long?, cursor: InsertCursor, decode: () -> Bitmap) {
         processingCount++
         lateinit var job: Job
         job = viewModelScope.launch(start = CoroutineStart.LAZY) {
@@ -166,7 +203,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         createImagePage(replaceId ?: ids.getAndIncrement(), decode(), detect = true, FilterMode.AUTO)
                     }
                     val idx = pages.indexOfFirst { it.id == page.id }
-                    if (idx >= 0) pages[idx] = page else pages.add(page)
+                    if (idx >= 0) {
+                        pages[idx] = page
+                    } else {
+                        val anchor = cursor.afterId?.let { a -> pages.indexOfFirst { it.id == a } } ?: -1
+                        if (anchor >= 0) pages.add(anchor + 1, page) else pages.add(page)
+                        if (cursor.afterId != null) cursor.afterId = page.id
+                        if (cursor.firstInsertedId == null) {
+                            cursor.firstInsertedId = page.id
+                            if (focusCursor === cursor) {
+                                focusCursor = null
+                                if (screen is Screen.PageEdit) screen = Screen.PageEdit(page.id)
+                            }
+                        }
+                    }
                     dirty = true
                 }
             } catch (e: CancellationException) {
@@ -182,7 +232,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         job.start()
     }
 
-    private fun createImagePage(id: Long, bitmap: Bitmap, detect: Boolean, filter: FilterMode): ImagePage {
+    private fun createImagePage(
+        id: Long,
+        bitmap: Bitmap,
+        detect: Boolean,
+        filter: FilterMode,
+        strength: Float = prefs.strength,
+    ): ImagePage {
         val stamp = System.nanoTime()
         val sourceFile = File(sessionDir, "p${id}_${stamp}_src.jpg")
         val previewFile = File(sessionDir, "p${id}_${stamp}_preview.jpg")
@@ -193,8 +249,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
         val quad = if (detect) DocumentDetector.detect(preview) else Quad.FULL
         val auto = suggestFilter(preview, quad)
-        val page = ImagePage(id, sourceFile, previewFile, quad, 0, filter, auto, null)
-        val thumb = ImageProcessor.render(preview, quad, 0, page.effectiveFilter, THUMB_MAX)
+        val page = ImagePage(id, sourceFile, previewFile, quad, 0, filter, auto, null, strength)
+        val thumb = ImageProcessor.render(preview, quad, 0, page.effectiveFilter, strength, THUMB_MAX)
         preview.recycle()
         return page.copy(thumbnail = thumb)
     }
@@ -214,11 +270,55 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun deletePage(id: Long) {
-        pageJobs.remove(id)?.cancel()
-        pages.removeAll { it.id == id }
-        pdfBaseThumbs.remove(id)
-        dirty = true
-        if (screen is Screen.PageEdit) screen = Screen.Document
+        val idx = pages.indexOfFirst { it.id == id }
+        deletePages(setOf(id))
+        if (screen is Screen.PageEdit) {
+            screen = if (pages.isEmpty()) Screen.Document else Screen.PageEdit(pages[idx.coerceIn(0, pages.lastIndex)].id)
+        }
+    }
+
+    fun deletePages(ids: Set<Long>) {
+        ids.forEach { id ->
+            pageJobs.remove(id)?.cancel()
+            pdfBaseThumbs.remove(id)
+        }
+        if (pages.removeAll { it.id in ids }) dirty = true
+    }
+
+    /**
+     * Sets filter and strength on several pages. Scanned PDF pages are converted to
+     * photo pages first; digital PDF pages are skipped.
+     */
+    fun applyFilterToPages(ids: Set<Long>, filter: FilterMode, strength: Float) {
+        prefs.strength = strength
+        val targets = pages.filter { it.id in ids }
+        val scans = targets.filterIsInstance<PdfPage>().filter { it.kind == PdfPageKind.SCANNED }
+        targets.filterIsInstance<ImagePage>().forEach {
+            updateImagePage(it.copy(filter = filter, strength = strength), recomputeAuto = false)
+        }
+        if (scans.isEmpty()) return
+        busyMessage = "Preparing ${scans.size} scanned page" + if (scans.size == 1) "…" else "s…"
+        viewModelScope.launch {
+            try {
+                for (scan in scans) {
+                    val converted = convertScan(scan) ?: continue
+                    replace(converted.copy(filter = filter, strength = strength))
+                    updateImagePage(converted.copy(filter = filter, strength = strength), recomputeAuto = false)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                message = "Could not prepare a page: ${e.message}"
+            } finally {
+                busyMessage = null
+            }
+        }
+    }
+
+    fun setStrength(id: Long, strength: Float) {
+        val p = page(id) as? ImagePage ?: return
+        prefs.strength = strength
+        updateImagePage(p.copy(strength = strength), recomputeAuto = false)
     }
 
     fun rotate(id: Long, delta: Int) {
@@ -263,13 +363,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         dirty = true
         pageJobs.remove(updated.id)?.cancel()
         pageJobs[updated.id] = viewModelScope.launch {
-            val refreshed = withContext(Dispatchers.Default) {
+            val refreshed = thumbSemaphore.withPermit {
+                withContext(Dispatchers.Default) {
                 val preview = BitmapIO.decode(updated.previewFile, PREVIEW_MAX)
                 val auto = if (recomputeAuto) suggestFilter(preview, updated.quad) else updated.autoFilter
                 val p = updated.copy(autoFilter = auto)
-                val thumb = ImageProcessor.render(preview, p.quad, p.rotation, p.effectiveFilter, THUMB_MAX)
-                preview.recycle()
-                p.copy(thumbnail = thumb)
+                val thumb = ImageProcessor.render(preview, p.quad, p.rotation, p.effectiveFilter, p.strength, THUMB_MAX)
+                    preview.recycle()
+                    p.copy(thumbnail = thumb)
+                }
             }
             // Only apply if nothing changed in the meantime.
             val current = page(updated.id) as? ImagePage
@@ -284,19 +386,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Converts an untouched scanned PDF page into an editable photo page. */
     fun convertScanToImage(id: Long) {
         val p = page(id) as? PdfPage ?: return
-        val src = source ?: return
         busyMessage = "Preparing page…"
         viewModelScope.launch {
             try {
-                val page = withContext(Dispatchers.Default) {
-                    val bmp = withRenderer(src.cacheFile) { r ->
-                        PdfBuilder.renderPage(r, p.index, p.nativeScale.coerceIn(1f, 5f), SOURCE_MAX)
-                    }
-                    createImagePage(p.id, BitmapIO.rotate(bmp, p.extraRotation), detect = false, FilterMode.ORIGINAL)
-                }
-                replace(page)
-                pdfBaseThumbs.remove(id)
-                dirty = true
+                convertScan(p)?.let { replace(it) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -305,6 +398,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 busyMessage = null
             }
         }
+    }
+
+    /** Renders a scanned page at its native resolution into a photo page with the same id. */
+    private suspend fun convertScan(p: PdfPage): ImagePage? {
+        val converted = withContext(Dispatchers.Default) {
+            val bmp = withRenderer(p.sourceFile) { r ->
+                PdfBuilder.renderPage(r, p.index, p.nativeScale.coerceIn(1f, 5f), SOURCE_MAX)
+            }
+            createImagePage(p.id, BitmapIO.rotate(bmp, p.extraRotation), detect = false, FilterMode.ORIGINAL)
+        }
+        if (page(p.id) == null) return null // deleted meanwhile
+        pdfBaseThumbs.remove(p.id)
+        dirty = true
+        return converted
     }
 
     private fun replace(page: PageItem) {
@@ -318,14 +425,47 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     suspend fun renderResult(page: ImagePage, preview: Bitmap): Bitmap = withContext(Dispatchers.Default) {
-        ImageProcessor.render(preview, page.quad, page.rotation, page.effectiveFilter, PREVIEW_MAX)
+        ImageProcessor.render(preview, page.quad, page.rotation, page.effectiveFilter, page.strength, PREVIEW_MAX)
     }
 
-    suspend fun renderPdfPage(page: PdfPage): Bitmap? {
-        val src = source ?: return null
+    /**
+     * For Colour and Gray the result is a linear blend between strength 0 and strength 1,
+     * so the screen can show any strength instantly by overlaying the second image.
+     */
+    suspend fun renderLayers(page: ImagePage, source: Bitmap, maxSide: Int = PREVIEW_MAX): Pair<Bitmap, Bitmap> =
+        withContext(Dispatchers.Default) {
+            val f = page.effectiveFilter
+            ImageProcessor.render(source, page.quad, page.rotation, f, 0f, maxSide) to
+                ImageProcessor.render(source, page.quad, page.rotation, f, 1f, maxSide)
+        }
+
+    suspend fun renderLayersSharp(page: ImagePage): Pair<Bitmap, Bitmap>? = runCatching {
+        val src = withContext(Dispatchers.Default) { BitmapIO.decode(page.sourceFile, SHARP_MAX) }
+        renderLayers(page, src, SHARP_MAX).also { src.recycle() }
+    }.getOrNull()
+
+    /** Quick, smaller render while the strength slider is being dragged. */
+    suspend fun renderLive(page: ImagePage, preview: Bitmap, strength: Float): Bitmap = withContext(Dispatchers.Default) {
+        ImageProcessor.render(preview, page.quad, page.rotation, page.effectiveFilter, strength, LIVE_MAX)
+    }
+
+    /** Result rendered from the full-resolution photo, for zooming in. */
+    suspend fun renderResultSharp(page: ImagePage): Bitmap? = withContext(Dispatchers.Default) {
+        runCatching {
+            val src = BitmapIO.decode(page.sourceFile, SHARP_MAX)
+            ImageProcessor.render(src, page.quad, page.rotation, page.effectiveFilter, page.strength, SHARP_MAX)
+                .also { if (it !== src) src.recycle() }
+        }.getOrNull()
+    }
+
+    /** Renders a page of the source PDF; [sharp] = high resolution for zooming in. */
+    suspend fun renderPdfPage(page: PdfPage, sharp: Boolean = false): Bitmap? {
         return withContext(Dispatchers.IO) {
             runCatching {
-                val bmp = withRenderer(src.cacheFile) { PdfBuilder.renderPage(it, page.index, 3f, PREVIEW_MAX) }
+                val bmp = withRenderer(page.sourceFile) {
+                    if (sharp) PdfBuilder.renderPage(it, page.index, 6f, SHARP_MAX)
+                    else PdfBuilder.renderPage(it, page.index, 3f, PREVIEW_MAX)
+                }
                 BitmapIO.rotate(bmp, page.extraRotation)
             }.getOrNull()
         }
@@ -344,18 +484,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     val name = store.displayName(uri) ?: "Document.pdf"
                     val src = SourcePdf(uri, name, file, store.canWrite(uri))
-                    val analyses = PdfLoader.open(file).use { doc ->
-                        (0 until doc.numberOfPages).map { PdfAnalyzer.analyze(doc, it) }
-                    }
-                    val list = withRenderer(file) { r ->
-                        analyses.mapIndexed { i, a ->
-                            val id = ids.getAndIncrement()
-                            val thumb = PdfBuilder.renderPage(r, i, 1f, THUMB_MAX)
-                            pdfBaseThumbs[id] = thumb
-                            PdfPage(id, i, a.kind, a.hasOcr, 0, a.nativeScale, thumb)
-                        }
-                    }
-                    src to list
+                    src to loadPdfPages(file)
                 }
                 source = src
                 pages.addAll(loaded)
@@ -369,6 +498,62 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: Throwable) {
                 clearSession()
                 message = "Could not open the PDF: ${e.message ?: e.javaClass.simpleName}"
+            } finally {
+                busyMessage = null
+            }
+        }
+    }
+
+    /** Analyses every page of a (private copy of a) PDF and creates page items with thumbnails. */
+    private fun loadPdfPages(file: File): List<PdfPage> {
+        val analyses = PdfLoader.open(file).use { doc ->
+            (0 until doc.numberOfPages).map { PdfAnalyzer.analyze(doc, it) }
+        }
+        return withRenderer(file) { r ->
+            analyses.mapIndexed { i, a ->
+                val id = ids.getAndIncrement()
+                val thumb = PdfBuilder.renderPage(r, i, 1f, THUMB_MAX)
+                pdfBaseThumbs[id] = thumb
+                PdfPage(id, file, i, a.kind, a.hasOcr, 0, a.nativeScale, thumb)
+            }
+        }
+    }
+
+    /**
+     * Inserts all pages of another PDF: at the end, or after [afterPageId]
+     * (then the editor jumps to the first inserted page).
+     */
+    fun insertPdf(uri: Uri, afterPageId: Long? = null) {
+        busyMessage = "Adding PDF…"
+        viewModelScope.launch {
+            try {
+                val loaded = withContext(Dispatchers.IO) {
+                    val file = File(sessionDir, "insert_${System.nanoTime()}.pdf")
+                    ctx.contentResolver.openInputStream(uri)!!.use { input ->
+                        file.outputStream().use { input.copyTo(it) }
+                    }
+                    try {
+                        loadPdfPages(file)
+                    } catch (e: Throwable) {
+                        file.delete()
+                        throw e
+                    }
+                }
+                if (loaded.isEmpty()) {
+                    message = "The PDF has no pages"
+                    return@launch
+                }
+                val anchor = afterPageId?.let { a -> pages.indexOfFirst { it.id == a } } ?: -1
+                if (anchor >= 0) pages.addAll(anchor + 1, loaded) else pages.addAll(loaded)
+                dirty = true
+                message = if (loaded.size == 1) "1 page added" else "${loaded.size} pages added"
+                if (afterPageId != null && screen is Screen.PageEdit) screen = Screen.PageEdit(loaded.first().id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: InvalidPasswordException) {
+                message = "This PDF is password-protected and can't be added."
+            } catch (e: Throwable) {
+                message = "Could not add the PDF: ${e.message ?: e.javaClass.simpleName}"
             } finally {
                 busyMessage = null
             }
@@ -405,7 +590,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val result = withContext(Dispatchers.Default) {
                     val tmp = File(ctx.cacheDir, "output.pdf")
-                    PdfBuilder(ctx).build(snapshot, src, quality, ocr, tmp) { done, total, what ->
+                    PdfBuilder(ctx).build(snapshot, quality, ocr, tmp) { done, total, what ->
                         saveProgress = SaveProgress(done, total, what)
                     }
                     val saved = if (overwrite && src != null) {
@@ -491,6 +676,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
         const val SOURCE_MAX = 4000
         const val PREVIEW_MAX = 1600
+        const val SHARP_MAX = 3000
+        const val LIVE_MAX = 1000
         const val THUMB_MAX = 480
 
         private fun norm(r: Int) = ((r % 360) + 360) % 360

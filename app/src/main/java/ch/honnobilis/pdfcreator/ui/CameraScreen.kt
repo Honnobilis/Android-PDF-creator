@@ -61,6 +61,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import ch.honnobilis.pdfcreator.AppViewModel
+import ch.honnobilis.pdfcreator.InsertCursor
 import ch.honnobilis.pdfcreator.Screen
 import kotlinx.coroutines.launch
 
@@ -69,7 +70,7 @@ import kotlinx.coroutines.launch
  * page pipeline; they never appear in the phone's gallery.
  */
 @Composable
-fun CameraScreen(vm: AppViewModel, replacePageId: Long?) {
+fun CameraScreen(vm: AppViewModel, replacePageId: Long?, insertAfterPageId: Long?) {
     val context = LocalContext.current
     var granted by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
@@ -89,7 +90,7 @@ fun CameraScreen(vm: AppViewModel, replacePageId: Long?) {
             .background(Color.Black),
     ) {
         if (granted) {
-            CameraContent(vm, replacePageId)
+            CameraContent(vm, replacePageId, insertAfterPageId)
         } else {
             Column(
                 Modifier
@@ -113,7 +114,18 @@ fun CameraScreen(vm: AppViewModel, replacePageId: Long?) {
 }
 
 @Composable
-private fun CameraContent(vm: AppViewModel, replacePageId: Long?) {
+private fun CameraContent(vm: AppViewModel, replacePageId: Long?, insertAfterPageId: Long?) {
+    val cursor = remember { InsertCursor(insertAfterPageId) }
+
+    /** Leaves the camera: inserting → editor on the first new page, otherwise the page grid. */
+    fun done() {
+        if (insertAfterPageId != null) {
+            vm.showFirstInserted(cursor, fallbackId = insertAfterPageId)
+        } else {
+            vm.navigate(Screen.Document)
+        }
+    }
+
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
@@ -143,7 +155,7 @@ private fun CameraContent(vm: AppViewModel, replacePageId: Long?) {
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                     capturing = false
                     shots++
-                    vm.addCapturedPhoto(file, replacePageId)
+                    vm.addCapturedPhoto(file, replacePageId, cursor)
                     if (replacePageId != null) vm.navigate(Screen.PageEdit(replacePageId))
                 }
 
@@ -188,7 +200,11 @@ private fun CameraContent(vm: AppViewModel, replacePageId: Long?) {
             IconButton(onClick = { vm.back() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
             Spacer(Modifier.weight(1f))
             Text(
-                if (replacePageId != null) "Retake page" else "Photos are not saved to the gallery",
+                when {
+                    replacePageId != null -> "Retake page"
+                    insertAfterPageId != null -> "Insert pages"
+                    else -> "Photos are not saved to the gallery"
+                },
                 color = Color.White.copy(alpha = 0.8f),
             )
             Spacer(Modifier.weight(1f))
@@ -233,7 +249,7 @@ private fun CameraContent(vm: AppViewModel, replacePageId: Long?) {
                             .size(56.dp)
                             .clip(RoundedCornerShape(8.dp))
                             .border(2.dp, Color.White, RoundedCornerShape(8.dp))
-                            .clickable { vm.navigate(Screen.Document) },
+                            .clickable { done() },
                     )
                 }
                 if (vm.processingCount > 0) {
@@ -255,7 +271,7 @@ private fun CameraContent(vm: AppViewModel, replacePageId: Long?) {
             // Done
             Box(Modifier.size(width = 96.dp, height = 56.dp), contentAlignment = Alignment.Center) {
                 if (replacePageId == null) {
-                    TextButton(onClick = { vm.navigate(Screen.Document) }) {
+                    TextButton(onClick = { done() }) {
                         Text(if (shots > 0) "Done ($shots)" else "Done", color = Color.White)
                     }
                 }
