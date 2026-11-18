@@ -173,7 +173,9 @@ fun PageEditScreen(vm: AppViewModel, pageId: Long) {
                     is ImagePage -> ImagePageEditor(vm, page, cropMode) { zoomed ->
                         if (zoomed) zoomedPageId = page.id else if (zoomedPageId == page.id) zoomedPageId = null
                     }
-                    is PdfPage -> PdfPageEditor(vm, page)
+                    is PdfPage -> PdfPageEditor(vm, page) { zoomed ->
+                        if (zoomed) zoomedPageId = page.id else if (zoomedPageId == page.id) zoomedPageId = null
+                    }
                     null -> Unit
                 }
             }
@@ -452,8 +454,14 @@ private fun CropEditor(bitmap: Bitmap, quad: Quad, onChange: (Quad) -> Unit) {
 // ---------------------------------------------------------------------------------------
 
 @Composable
-private fun PdfPageEditor(vm: AppViewModel, page: PdfPage) {
+private fun PdfPageEditor(vm: AppViewModel, page: PdfPage, onZoomedChange: (Boolean) -> Unit) {
     val rendered by produceState<Bitmap?>(null, page.index, page.extraRotation) { value = vm.renderPdfPage(page) }
+    var zoom by remember(page.id) { mutableFloatStateOf(1f) }
+    val wantSharp = zoom > 1.3f
+    val sharp by produceState<Bitmap?>(null, wantSharp, page.index, page.extraRotation) {
+        value = null
+        if (wantSharp) value = vm.renderPdfPage(page, sharp = true)
+    }
 
     Column(Modifier.fillMaxSize()) {
         Box(
@@ -463,9 +471,17 @@ private fun PdfPageEditor(vm: AppViewModel, page: PdfPage) {
                 .padding(16.dp),
             contentAlignment = Alignment.Center,
         ) {
-            val r = rendered
+            val r = sharp ?: rendered
             if (r != null) {
-                Image(r.asImageBitmap(), null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+                ZoomableImage(
+                    bitmap = r,
+                    contentDescription = "Page",
+                    onScaleChange = {
+                        zoom = it
+                        onZoomedChange(it > 1.01f)
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
             } else {
                 CircularProgressIndicator()
             }

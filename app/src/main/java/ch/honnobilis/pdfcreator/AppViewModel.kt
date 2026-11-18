@@ -391,11 +391,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }.getOrNull()
     }
 
-    suspend fun renderPdfPage(page: PdfPage): Bitmap? {
+    /** Renders a page of the source PDF; [sharp] = high resolution for zooming in. */
+    suspend fun renderPdfPage(page: PdfPage, sharp: Boolean = false): Bitmap? {
         val src = source ?: return null
         return withContext(Dispatchers.IO) {
             runCatching {
-                val bmp = withRenderer(src.cacheFile) { PdfBuilder.renderPage(it, page.index, 3f, PREVIEW_MAX) }
+                val bmp = withRenderer(src.cacheFile) {
+                    if (sharp) PdfBuilder.renderPage(it, page.index, 6f, SHARP_MAX)
+                    else PdfBuilder.renderPage(it, page.index, 3f, PREVIEW_MAX)
+                }
                 BitmapIO.rotate(bmp, page.extraRotation)
             }.getOrNull()
         }
