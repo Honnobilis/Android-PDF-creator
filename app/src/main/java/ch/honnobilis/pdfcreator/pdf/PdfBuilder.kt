@@ -11,7 +11,6 @@ import ch.honnobilis.pdfcreator.model.ImagePage
 import ch.honnobilis.pdfcreator.model.PageItem
 import ch.honnobilis.pdfcreator.model.PdfPage
 import ch.honnobilis.pdfcreator.model.PdfPageKind
-import ch.honnobilis.pdfcreator.model.SourcePdf
 import ch.honnobilis.pdfcreator.ocr.OcrEngine
 import ch.honnobilis.pdfcreator.ocr.OcrWord
 import com.tom_roush.pdfbox.pdmodel.PDDocument
@@ -47,7 +46,6 @@ class PdfBuilder(private val context: Context) {
      */
     suspend fun build(
         pages: List<PageItem>,
-        source: SourcePdf?,
         quality: Quality,
         ocr: Boolean,
         out: File,
@@ -55,14 +53,11 @@ class PdfBuilder(private val context: Context) {
     ) {
         val total = pages.size
         var ocrEngine: OcrEngine? = null
-        var srcDoc: PDDocument? = null
-        var renderer: PdfRenderer? = null
-        var fd: ParcelFileDescriptor? = null
+        // Source PDFs (the edited one and any inserted ones), opened on first use.
+        val sourceDocs = HashMap<File, PDDocument>()
+        val renderers = HashMap<File, Pair<ParcelFileDescriptor, PdfRenderer>>()
         try {
             PDDocument().use { doc ->
-                if (source != null) {
-                    srcDoc = PdfLoader.open(source.cacheFile)
-                }
                 pages.forEachIndexed { i, page ->
                     coroutineContext.ensureActive()
                     val needsOcr = ocr && when (page) {
@@ -74,10 +69,14 @@ class PdfBuilder(private val context: Context) {
                     when (page) {
                         is ImagePage -> addImagePage(doc, page, quality, if (needsOcr) ocrEngine else null)
                         is PdfPage -> {
-                            val sd = srcDoc ?: error("Source PDF missing")
-                            if (needsOcr && renderer == null) {
-                                fd = ParcelFileDescriptor.open(source!!.cacheFile, ParcelFileDescriptor.MODE_READ_ONLY)
-                                renderer = PdfRenderer(fd!!)
+                            val sd = sourceDocs.getOrPut(page.sourceFile) { PdfLoader.open(page.sourceFile) }
+                            val renderer = if (needsOcr) {
+                                renderers.getOrPut(page.sourceFile) {
+                                    val fd = ParcelFileDescriptor.open(page.sourceFile, ParcelFileDescriptor.MODE_READ_ONLY)
+                                    fd to PdfRenderer(fd)
+                                }.second
+                            } else {
+                                null
                             }
                             copyPdfPage(doc, sd, page, if (needsOcr) ocrEngine to renderer else null)
                         }
@@ -88,9 +87,11 @@ class PdfBuilder(private val context: Context) {
             }
         } finally {
             ocrEngine?.close()
-            renderer?.close()
-            fd?.close()
-            srcDoc?.close()
+            renderers.values.forEach { (fd, r) ->
+                r.close()
+                fd.close()
+            }
+            sourceDocs.values.forEach { it.close() }
         }
     }
 

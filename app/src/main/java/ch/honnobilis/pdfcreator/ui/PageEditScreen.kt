@@ -7,6 +7,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.filled.AddAPhoto
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.foundation.Canvas
@@ -127,6 +128,12 @@ fun PageEditScreen(vm: AppViewModel, pageId: Long) {
     var confirmDelete by remember { mutableStateOf(false) }
     var addMenu by remember { mutableStateOf(false) }
     var galleryAnchor by remember { mutableStateOf<Long?>(null) }
+    var pdfAnchor by remember { mutableStateOf<Long?>(null) }
+    val pickPdf = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val anchor = pdfAnchor
+        if (uri != null && anchor != null) vm.insertPdf(uri, afterPageId = anchor)
+        pdfAnchor = null
+    }
     val pickImages = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
         val anchor = galleryAnchor
         if (uris.isNotEmpty() && anchor != null) vm.addFromGallery(uris, insertAfterPageId = anchor)
@@ -180,6 +187,15 @@ fun PageEditScreen(vm: AppViewModel, pageId: Long) {
                                         addMenu = false
                                         galleryAnchor = current.id
                                         pickImages.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Insert PDF after this page") },
+                                    leadingIcon = { Icon(Icons.Filled.PictureAsPdf, null) },
+                                    onClick = {
+                                        addMenu = false
+                                        pdfAnchor = current.id
+                                        pickPdf.launch(arrayOf("application/pdf"))
                                     },
                                 )
                             }

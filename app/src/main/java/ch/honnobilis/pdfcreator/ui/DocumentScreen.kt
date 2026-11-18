@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.DragIndicator
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Tune
@@ -111,6 +112,9 @@ fun DocumentScreen(vm: AppViewModel) {
     val pickImages = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
         if (uris.isNotEmpty()) vm.addFromGallery(uris)
     }
+    val pickPdf = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) vm.insertPdf(uri)
+    }
 
     Scaffold(
         topBar = {
@@ -168,20 +172,34 @@ fun DocumentScreen(vm: AppViewModel) {
                         Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        FilledTonalButton(onClick = { vm.navigate(Screen.Camera()) }, modifier = Modifier.weight(1f)) {
+                        FilledTonalButton(
+                            onClick = { vm.navigate(Screen.Camera()) },
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                        ) {
                             Icon(Icons.Filled.CameraAlt, null)
-                            Spacer(Modifier.width(8.dp))
-                            Text("Camera")
+                            Spacer(Modifier.width(6.dp))
+                            Text("Camera", maxLines = 1)
                         }
                         FilledTonalButton(
                             onClick = { pickImages.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
                             modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 8.dp),
                         ) {
                             Icon(Icons.Filled.PhotoLibrary, null)
-                            Spacer(Modifier.width(8.dp))
-                            Text("Gallery")
+                            Spacer(Modifier.width(6.dp))
+                            Text("Gallery", maxLines = 1)
+                        }
+                        FilledTonalButton(
+                            onClick = { pickPdf.launch(arrayOf("application/pdf")) },
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                        ) {
+                            Icon(Icons.Filled.PictureAsPdf, null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("PDF", maxLines = 1)
                         }
                     }
                 }
@@ -210,7 +228,7 @@ fun DocumentScreen(vm: AppViewModel) {
                 ) {
                     if (vm.processingCount == 0) {
                         Text(
-                            "Add pages with the camera or from the gallery.",
+                            "Add pages with the camera, from the gallery or from another PDF.",
                             textAlign = TextAlign.Center,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

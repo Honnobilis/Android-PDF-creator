@@ -402,9 +402,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Renders a scanned page at its native resolution into a photo page with the same id. */
     private suspend fun convertScan(p: PdfPage): ImagePage? {
-        val src = source ?: return null
         val converted = withContext(Dispatchers.Default) {
-            val bmp = withRenderer(src.cacheFile) { r ->
+            val bmp = withRenderer(p.sourceFile) { r ->
                 PdfBuilder.renderPage(r, p.index, p.nativeScale.coerceIn(1f, 5f), SOURCE_MAX)
             }
             createImagePage(p.id, BitmapIO.rotate(bmp, p.extraRotation), detect = false, FilterMode.ORIGINAL)
@@ -461,10 +460,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Renders a page of the source PDF; [sharp] = high resolution for zooming in. */
     suspend fun renderPdfPage(page: PdfPage, sharp: Boolean = false): Bitmap? {
-        val src = source ?: return null
         return withContext(Dispatchers.IO) {
             runCatching {
-                val bmp = withRenderer(src.cacheFile) {
+                val bmp = withRenderer(page.sourceFile) {
                     if (sharp) PdfBuilder.renderPage(it, page.index, 6f, SHARP_MAX)
                     else PdfBuilder.renderPage(it, page.index, 3f, PREVIEW_MAX)
                 }
@@ -486,18 +484,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     val name = store.displayName(uri) ?: "Document.pdf"
                     val src = SourcePdf(uri, name, file, store.canWrite(uri))
-                    val analyses = PdfLoader.open(file).use { doc ->
-                        (0 until doc.numberOfPages).map { PdfAnalyzer.analyze(doc, it) }
-                    }
-                    val list = withRenderer(file) { r ->
-                        analyses.mapIndexed { i, a ->
-                            val id = ids.getAndIncrement()
-                            val thumb = PdfBuilder.renderPage(r, i, 1f, THUMB_MAX)
-                            pdfBaseThumbs[id] = thumb
-                            PdfPage(id, i, a.kind, a.hasOcr, 0, a.nativeScale, thumb)
-                        }
-                    }
-                    src to list
+                    src to loadPdfPages(file)
                 }
                 source = src
                 pages.addAll(loaded)
@@ -511,6 +498,62 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: Throwable) {
                 clearSession()
                 message = "Could not open the PDF: ${e.message ?: e.javaClass.simpleName}"
+            } finally {
+                busyMessage = null
+            }
+        }
+    }
+
+    /** Analyses every page of a (private copy of a) PDF and creates page items with thumbnails. */
+    private fun loadPdfPages(file: File): List<PdfPage> {
+        val analyses = PdfLoader.open(file).use { doc ->
+            (0 until doc.numberOfPages).map { PdfAnalyzer.analyze(doc, it) }
+        }
+        return withRenderer(file) { r ->
+            analyses.mapIndexed { i, a ->
+                val id = ids.getAndIncrement()
+                val thumb = PdfBuilder.renderPage(r, i, 1f, THUMB_MAX)
+                pdfBaseThumbs[id] = thumb
+                PdfPage(id, file, i, a.kind, a.hasOcr, 0, a.nativeScale, thumb)
+            }
+        }
+    }
+
+    /**
+     * Inserts all pages of another PDF: at the end, or after [afterPageId]
+     * (then the editor jumps to the first inserted page).
+     */
+    fun insertPdf(uri: Uri, afterPageId: Long? = null) {
+        busyMessage = "Adding PDF…"
+        viewModelScope.launch {
+            try {
+                val loaded = withContext(Dispatchers.IO) {
+                    val file = File(sessionDir, "insert_${System.nanoTime()}.pdf")
+                    ctx.contentResolver.openInputStream(uri)!!.use { input ->
+                        file.outputStream().use { input.copyTo(it) }
+                    }
+                    try {
+                        loadPdfPages(file)
+                    } catch (e: Throwable) {
+                        file.delete()
+                        throw e
+                    }
+                }
+                if (loaded.isEmpty()) {
+                    message = "The PDF has no pages"
+                    return@launch
+                }
+                val anchor = afterPageId?.let { a -> pages.indexOfFirst { it.id == a } } ?: -1
+                if (anchor >= 0) pages.addAll(anchor + 1, loaded) else pages.addAll(loaded)
+                dirty = true
+                message = if (loaded.size == 1) "1 page added" else "${loaded.size} pages added"
+                if (afterPageId != null && screen is Screen.PageEdit) screen = Screen.PageEdit(loaded.first().id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: InvalidPasswordException) {
+                message = "This PDF is password-protected and can't be added."
+            } catch (e: Throwable) {
+                message = "Could not add the PDF: ${e.message ?: e.javaClass.simpleName}"
             } finally {
                 busyMessage = null
             }
@@ -547,7 +590,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val result = withContext(Dispatchers.Default) {
                     val tmp = File(ctx.cacheDir, "output.pdf")
-                    PdfBuilder(ctx).build(snapshot, src, quality, ocr, tmp) { done, total, what ->
+                    PdfBuilder(ctx).build(snapshot, quality, ocr, tmp) { done, total, what ->
                         saveProgress = SaveProgress(done, total, what)
                     }
                     val saved = if (overwrite && src != null) {
