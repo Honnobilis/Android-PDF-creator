@@ -52,6 +52,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -111,6 +112,8 @@ fun PageEditScreen(vm: AppViewModel, pageId: Long) {
     }
 
     val current = vm.pages.getOrNull(pager.currentPage)
+    // Page that is currently zoomed in; swiping is paused while it is shown.
+    var zoomedPageId by remember { mutableStateOf<Long?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -163,11 +166,13 @@ fun PageEditScreen(vm: AppViewModel, pageId: Long) {
             HorizontalPager(
                 state = pager,
                 key = { i -> vm.pages.getOrNull(i)?.id ?: i },
-                userScrollEnabled = !(cropMode && current is ImagePage),
+                userScrollEnabled = !(cropMode && current is ImagePage) && zoomedPageId != current?.id,
                 modifier = Modifier.weight(1f),
             ) { i ->
                 when (val page = vm.pages.getOrNull(i)) {
-                    is ImagePage -> ImagePageEditor(vm, page, cropMode)
+                    is ImagePage -> ImagePageEditor(vm, page, cropMode) { zoomed ->
+                        if (zoomed) zoomedPageId = page.id else if (zoomedPageId == page.id) zoomedPageId = null
+                    }
                     is PdfPage -> PdfPageEditor(vm, page)
                     null -> Unit
                 }
@@ -196,11 +201,18 @@ fun PageEditScreen(vm: AppViewModel, pageId: Long) {
 // ---------------------------------------------------------------------------------------
 
 @Composable
-private fun ImagePageEditor(vm: AppViewModel, page: ImagePage, cropMode: Boolean) {
+private fun ImagePageEditor(vm: AppViewModel, page: ImagePage, cropMode: Boolean, onZoomedChange: (Boolean) -> Unit) {
     val preview by produceState<Bitmap?>(null, page.previewFile) { value = vm.loadPreview(page) }
     val result by produceState<Bitmap?>(null, preview, page.quad, page.rotation, page.effectiveFilter, page.strength) {
         val p = preview
         value = if (p != null) vm.renderResult(page, p) else null
+    }
+    var zoom by remember(page.id) { mutableFloatStateOf(1f) }
+    val wantSharp = zoom > 1.3f && !cropMode
+    // Sharper version from the full-resolution photo, only while zoomed in.
+    val sharp by produceState<Bitmap?>(null, wantSharp, page.quad, page.rotation, page.effectiveFilter, page.strength) {
+        value = null
+        if (wantSharp) value = vm.renderResultSharp(page)
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -215,9 +227,17 @@ private fun ImagePageEditor(vm: AppViewModel, page: ImagePage, cropMode: Boolean
             if (cropMode && p != null) {
                 CropEditor(p, page.quad) { vm.setQuad(page.id, it) }
             } else {
-                val r = result
+                val r = sharp ?: result
                 if (r != null) {
-                    Image(r.asImageBitmap(), "Result", contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+                    ZoomableImage(
+                        bitmap = r,
+                        contentDescription = "Result",
+                        onScaleChange = {
+                            zoom = it
+                            onZoomedChange(it > 1.01f)
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                    )
                 } else {
                     CircularProgressIndicator()
                 }

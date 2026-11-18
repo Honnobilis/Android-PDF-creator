@@ -382,6 +382,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         ImageProcessor.render(preview, page.quad, page.rotation, page.effectiveFilter, page.strength, PREVIEW_MAX)
     }
 
+    /** Result rendered from the full-resolution photo, for zooming in. */
+    suspend fun renderResultSharp(page: ImagePage): Bitmap? = withContext(Dispatchers.Default) {
+        runCatching {
+            val src = BitmapIO.decode(page.sourceFile, SHARP_MAX)
+            ImageProcessor.render(src, page.quad, page.rotation, page.effectiveFilter, page.strength, SHARP_MAX)
+                .also { if (it !== src) src.recycle() }
+        }.getOrNull()
+    }
+
     suspend fun renderPdfPage(page: PdfPage): Bitmap? {
         val src = source ?: return null
         return withContext(Dispatchers.IO) {
@@ -552,6 +561,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
         const val SOURCE_MAX = 4000
         const val PREVIEW_MAX = 1600
+        const val SHARP_MAX = 3000
         const val THUMB_MAX = 480
 
         private fun norm(r: Int) = ((r % 360) + 360) % 360
