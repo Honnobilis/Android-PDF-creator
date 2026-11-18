@@ -91,11 +91,17 @@ fun AppRoot(vm: AppViewModel) {
                 }
             },
             confirmButton = {
-                TextButton(onClick = { sharePdf(context, r.uri, r.name) }) { Text("Share") }
+                TextButton(onClick = {
+                    sharePdf(context, r.uri, r.name)
+                    vm.finishSaved(keepEditing = false)
+                }) { Text("Share") }
             },
             dismissButton = {
                 Row {
-                    TextButton(onClick = { openPdf(context, r.uri) }) { Text("Open") }
+                    TextButton(onClick = {
+                        openPdf(context, r.uri)
+                        vm.finishSaved(keepEditing = false)
+                    }) { Text("Open") }
                     TextButton(onClick = { vm.finishSaved(keepEditing = false) }) { Text("Done") }
                 }
             },

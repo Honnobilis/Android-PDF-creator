@@ -8,6 +8,7 @@ import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
@@ -42,11 +43,15 @@ fun ZoomableImage(
     contentDescription: String?,
     onScaleChange: (Float) -> Unit,
     modifier: Modifier = Modifier,
+    /** Optional second image drawn on top with [overlayAlpha] (same size as [bitmap]). */
+    overlay: Bitmap? = null,
+    overlayAlpha: Float = 0f,
 ) {
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     val report by rememberUpdatedState(onScaleChange)
     val image = remember(bitmap) { bitmap.asImageBitmap() }
+    val overlayImage = remember(overlay) { overlay?.asImageBitmap() }
     // Aspect ratio of the content; stays the same when a sharper bitmap replaces a smaller one.
     val aspect = bitmap.width.toFloat() / bitmap.height
 
@@ -72,10 +77,7 @@ fun ZoomableImage(
             report(s)
         }
 
-        Image(
-            image,
-            contentDescription,
-            contentScale = ContentScale.Fit,
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(boxW, boxH, aspect) {
@@ -119,6 +121,16 @@ fun ZoomableImage(
                     translationX = offset.x
                     translationY = offset.y
                 },
-        )
+        ) {
+            Image(image, contentDescription, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+            if (overlayImage != null && overlayAlpha > 0f) {
+                Image(
+                    overlayImage, null,
+                    contentScale = ContentScale.Fit,
+                    alpha = overlayAlpha.coerceIn(0f, 1f),
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
     }
 }

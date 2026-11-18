@@ -29,7 +29,9 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.launch
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.RotateLeft
@@ -251,16 +253,44 @@ fun PageEditScreen(vm: AppViewModel, pageId: Long) {
 @Composable
 private fun ImagePageEditor(vm: AppViewModel, page: ImagePage, cropMode: Boolean, onZoomedChange: (Boolean) -> Unit) {
     val preview by produceState<Bitmap?>(null, page.previewFile) { value = vm.loadPreview(page) }
-    val result by produceState<Bitmap?>(null, preview, page.quad, page.rotation, page.effectiveFilter, page.strength) {
+    val effective = page.effectiveFilter
+    // Colour/Gray: two layers (strength 0 and 1) blended on screen → slider is instant.
+    val layered = effective == FilterMode.COLOR || effective == FilterMode.GRAY
+    // Strength while the slider is being dragged.
+    var live by remember(page.id) { mutableStateOf<Float?>(null) }
+
+    val layers by produceState<Pair<Bitmap, Bitmap>?>(null, layered, preview, page.quad, page.rotation, effective) {
         val p = preview
-        value = if (p != null) vm.renderResult(page, p) else null
+        value = if (layered && p != null) vm.renderLayers(page, p) else null
     }
+    // Other filters: one rendered image, tagged with the strength it was made with.
+    val result by produceState<Pair<Float, Bitmap>?>(null, layered, preview, page.quad, page.rotation, effective, page.strength) {
+        val p = preview
+        if (!layered && p != null) value = page.strength to vm.renderResult(page, p)
+    }
+    // B&W while dragging: smaller renders, never more than one at a time.
+    var liveBw by remember(page.id) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(page.id, preview, page.quad, page.rotation, effective) {
+        snapshotFlow { live }.conflate().collect { l ->
+            val p = preview
+            if (effective == FilterMode.BW && l != null && p != null) liveBw = vm.renderLive(page, p, l)
+        }
+    }
+
     var zoom by remember(page.id) { mutableFloatStateOf(1f) }
     val wantSharp = zoom > 1.3f && !cropMode
-    // Sharper version from the full-resolution photo, only while zoomed in.
-    val sharp by produceState<Bitmap?>(null, wantSharp, page.quad, page.rotation, page.effectiveFilter, page.strength) {
+    // Sharper versions from the full-resolution photo, only while zoomed in.
+    val sharpLayers by produceState<Pair<Bitmap, Bitmap>?>(null, wantSharp && layered, page.quad, page.rotation, effective) {
         value = null
-        if (wantSharp) value = vm.renderResultSharp(page)
+        if (wantSharp && layered) value = vm.renderLayersSharp(page)
+    }
+    val sharp by produceState<Bitmap?>(null, wantSharp && !layered, page.quad, page.rotation, effective, page.strength) {
+        value = null
+        if (wantSharp && !layered) value = vm.renderResultSharp(page)
+    }
+    val onScale: (Float) -> Unit = {
+        zoom = it
+        onZoomedChange(it > 1.01f)
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -275,15 +305,29 @@ private fun ImagePageEditor(vm: AppViewModel, page: ImagePage, cropMode: Boolean
             if (cropMode && p != null) {
                 CropEditor(p, page.quad) { vm.setQuad(page.id, it) }
             } else {
-                val r = sharp ?: result
-                if (r != null) {
+                val strength = live ?: page.strength
+                val l = sharpLayers ?: layers
+                val r = result
+                val showLiveBw = effective == FilterMode.BW && liveBw != null &&
+                    (live != null || r == null || r.first != page.strength)
+                val single = when {
+                    showLiveBw -> liveBw
+                    else -> sharp ?: r?.second
+                }
+                if (layered && l != null) {
                     ZoomableImage(
-                        bitmap = r,
+                        bitmap = l.first,
+                        overlay = l.second,
+                        overlayAlpha = strength,
                         contentDescription = "Result",
-                        onScaleChange = {
-                            zoom = it
-                            onZoomedChange(it > 1.01f)
-                        },
+                        onScaleChange = onScale,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else if (!layered && single != null) {
+                    ZoomableImage(
+                        bitmap = single,
+                        contentDescription = "Result",
+                        onScaleChange = onScale,
                         modifier = Modifier.fillMaxSize(),
                     )
                 } else {
@@ -321,6 +365,7 @@ private fun ImagePageEditor(vm: AppViewModel, page: ImagePage, cropMode: Boolean
                 effective = page.effectiveFilter,
                 strength = page.strength,
                 onChange = { vm.setStrength(page.id, it) },
+                onLiveChange = { live = it },
                 modifier = Modifier.padding(horizontal = 16.dp),
             )
             Row(

@@ -120,8 +120,7 @@ private fun CameraContent(vm: AppViewModel, replacePageId: Long?, insertAfterPag
     /** Leaves the camera: inserting → editor on the first new page, otherwise the page grid. */
     fun done() {
         if (insertAfterPageId != null) {
-            val target = cursor.firstInsertedId ?: insertAfterPageId
-            vm.navigate(if (vm.page(target) != null) Screen.PageEdit(target) else Screen.Document)
+            vm.showFirstInserted(cursor, fallbackId = insertAfterPageId)
         } else {
             vm.navigate(Screen.Document)
         }

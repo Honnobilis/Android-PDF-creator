@@ -162,6 +162,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Adds photos at the end, or after [insertAfterPageId] in the order picked. */
     fun addFromGallery(uris: List<Uri>, insertAfterPageId: Long? = null) {
         val cursor = InsertCursor(insertAfterPageId)
+        // Inserting from the page editor: show the first new page once it is ready.
+        if (insertAfterPageId != null) focusCursor = cursor
         uris.forEach { uri -> enqueueImport(null, cursor) { BitmapIO.decode(ctx, uri, SOURCE_MAX) } }
     }
 
@@ -173,6 +175,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 file.delete()
             }
         }
+    }
+
+    /** Pending "jump to the first inserted page" request. */
+    private var focusCursor: InsertCursor? = null
+
+    /**
+     * Opens the page editor on the first page inserted through [cursor]; if that page
+     * is still being processed, on [fallbackId] now and on the new page once it is ready.
+     */
+    fun showFirstInserted(cursor: InsertCursor, fallbackId: Long) {
+        val first = cursor.firstInsertedId
+        val target = first ?: fallbackId
+        screen = if (page(target) != null) Screen.PageEdit(target) else Screen.Document
+        focusCursor = if (first == null) cursor else null
     }
 
     fun newCaptureFile(): File = File(File(ctx.cacheDir, "capture").apply { mkdirs() }, "${System.nanoTime()}.jpg")
@@ -193,7 +209,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         val anchor = cursor.afterId?.let { a -> pages.indexOfFirst { it.id == a } } ?: -1
                         if (anchor >= 0) pages.add(anchor + 1, page) else pages.add(page)
                         if (cursor.afterId != null) cursor.afterId = page.id
-                        if (cursor.firstInsertedId == null) cursor.firstInsertedId = page.id
+                        if (cursor.firstInsertedId == null) {
+                            cursor.firstInsertedId = page.id
+                            if (focusCursor === cursor) {
+                                focusCursor = null
+                                if (screen is Screen.PageEdit) screen = Screen.PageEdit(page.id)
+                            }
+                        }
                     }
                     dirty = true
                 }
@@ -407,6 +429,27 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         ImageProcessor.render(preview, page.quad, page.rotation, page.effectiveFilter, page.strength, PREVIEW_MAX)
     }
 
+    /**
+     * For Colour and Gray the result is a linear blend between strength 0 and strength 1,
+     * so the screen can show any strength instantly by overlaying the second image.
+     */
+    suspend fun renderLayers(page: ImagePage, source: Bitmap, maxSide: Int = PREVIEW_MAX): Pair<Bitmap, Bitmap> =
+        withContext(Dispatchers.Default) {
+            val f = page.effectiveFilter
+            ImageProcessor.render(source, page.quad, page.rotation, f, 0f, maxSide) to
+                ImageProcessor.render(source, page.quad, page.rotation, f, 1f, maxSide)
+        }
+
+    suspend fun renderLayersSharp(page: ImagePage): Pair<Bitmap, Bitmap>? = runCatching {
+        val src = withContext(Dispatchers.Default) { BitmapIO.decode(page.sourceFile, SHARP_MAX) }
+        renderLayers(page, src, SHARP_MAX).also { src.recycle() }
+    }.getOrNull()
+
+    /** Quick, smaller render while the strength slider is being dragged. */
+    suspend fun renderLive(page: ImagePage, preview: Bitmap, strength: Float): Bitmap = withContext(Dispatchers.Default) {
+        ImageProcessor.render(preview, page.quad, page.rotation, page.effectiveFilter, strength, LIVE_MAX)
+    }
+
     /** Result rendered from the full-resolution photo, for zooming in. */
     suspend fun renderResultSharp(page: ImagePage): Bitmap? = withContext(Dispatchers.Default) {
         runCatching {
@@ -591,6 +634,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         const val SOURCE_MAX = 4000
         const val PREVIEW_MAX = 1600
         const val SHARP_MAX = 3000
+        const val LIVE_MAX = 1000
         const val THUMB_MAX = 480
 
         private fun norm(r: Int) = ((r % 360) + 360) % 360

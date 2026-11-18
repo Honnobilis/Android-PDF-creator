@@ -48,7 +48,14 @@ fun FilterChips(selected: FilterMode?, autoResult: FilterMode?, onSelect: (Filte
  * (re-rendering on every move would be too slow).
  */
 @Composable
-fun StrengthSlider(effective: FilterMode?, strength: Float, onChange: (Float) -> Unit, modifier: Modifier = Modifier) {
+fun StrengthSlider(
+    effective: FilterMode?,
+    strength: Float,
+    onChange: (Float) -> Unit,
+    modifier: Modifier = Modifier,
+    /** Value while dragging; null when the finger is lifted. */
+    onLiveChange: (Float?) -> Unit = {},
+) {
     var value by remember(strength) { mutableFloatStateOf(strength) }
     val enabled = effective != FilterMode.ORIGINAL
     val label = when (effective) {
@@ -63,8 +70,14 @@ fun StrengthSlider(effective: FilterMode?, strength: Float, onChange: (Float) ->
         }
         Slider(
             value = value,
-            onValueChange = { value = it },
-            onValueChangeFinished = { onChange(value) },
+            onValueChange = {
+                value = it
+                onLiveChange(it)
+            },
+            onValueChangeFinished = {
+                onChange(value)
+                onLiveChange(null)
+            },
             enabled = enabled,
             modifier = Modifier.padding(top = 0.dp),
         )
